@@ -4,11 +4,33 @@ use flatline::session::Session;
 use flatline::session::Userauth;
 use tokio::fs;
 use tokio::io::AsyncReadExt;
+use tokio::io::AsyncWriteExt;
 use tokio::net::TcpListener;
 use tokio::net::TcpStream;
 use tokio::sync::watch;
 
 include!("./user.conf");
+
+async fn copy(first: &mut TcpStream, second: &mut flatline::forward::Stream) {
+    let mut buf = Vec::with_capacity(512);
+    loop {
+        tokio::select! {
+            res = first.read_buf(&mut buf) => {
+                let size = res.unwrap();
+                if size == 0 {
+                    break;
+                }
+                second.write(buf[..size].to_vec()).await.unwrap();
+                buf.clear();
+            }
+            res = second.read() => {
+                let data = res.unwrap();
+
+                first.write_all(&data).await.unwrap();
+            }
+        }
+    }
+}
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
@@ -49,7 +71,7 @@ async fn main() {
                         _ = recver.changed() => {
 
                         }
-                        _ = tokio::io::copy_bidirectional(&mut local, &mut remote) => {
+                        _ = copy(&mut local, &mut remote) => {
 
                         }
                     };

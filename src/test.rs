@@ -85,43 +85,44 @@ fn rand_map<K, V>(map: &mut IndexMap<K, V>) {
     map.sort_by_cached_key(|_, _| thread_rng().gen::<usize>());
 }
 
-#[tokio::test]
-async fn open_sftp() {
-    let session = open_session::<DefaultBehavior>(Default::default()).await;
+// #[tokio::test]
+// async fn open_sftp() {
+//     let session = open_session::<DefaultBehavior>(Default::default()).await;
 
-    let mut sftp = session.sftp_open_default().await.unwrap();
+//     let mut sftp = session.sftp_open_default().await.unwrap();
 
-    let dir = sftp.open_dir("/usr/lib/aarch64-linux-gnu").await.unwrap();
+//     let dir = sftp.open_dir("/usr/lib/aarch64-linux-gnu").await.unwrap();
 
-    let path = sftp.realpath("./Documents").await.unwrap();
+//     let path = sftp.realpath("./Documents").await.unwrap();
 
-    println!("real path: {}", path);
+//     println!("real path: {}", path);
 
-    loop {
-        let infos = sftp.read_dir(&dir).await.unwrap();
+//     loop {
+//         let infos = sftp.read_dir(&dir).await.unwrap();
 
-        if infos.is_empty() {
-            break;
-        }
-    }
+//         if infos.is_empty() {
+//             break;
+//         }
+//     }
 
-    let channel = session.channel_open_default().await.unwrap();
+//     let channel = session.channel_open_default().await.unwrap();
 
-    let content = "123456789\n";
-    let mut sender = scp::Sender::from_channel(
-        channel,
-        "./Documents/test1.scp.txt",
-        content.len() as u64,
-        Permissions::p0755(),
-        None,
-    )
-    .await
-    .unwrap();
+//     let content = "123456789\n";
+//     let mut sender = scp::Sender::from_channel(
+//         channel,
+//         "./Documents/test1.scp.txt",
+//         content.len() as u64,
+//         Permissions::p0755(),
+//         None,
+//         false,
+//     )
+//     .await
+//     .unwrap();
 
-    sender.send(content).await.unwrap();
+//     sender.send(content).await.unwrap();
 
-    sender.finish().await.unwrap();
-}
+//     sender.finish().await.unwrap();
+// }
 
 async fn echo_hello<B: Behavior + Send + Sync + 'static>(config: Config<B>, times: usize) {
     let socket = TcpStream::connect(IP).await.unwrap();

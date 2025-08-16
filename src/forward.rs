@@ -1,16 +1,14 @@
-use std::{
-    io,
-    mem::{self, ManuallyDrop},
-    pin::{pin, Pin},
-    task::{Context, Poll},
-};
+use std::fmt::Debug;
 
 use derive_new::new;
 use snafu::OptionExt;
-use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
-use crate::{channel::Channel, error::builder, msg::Request};
-use crate::{channel::Stream as ChannelStream, error::Result};
+use crate::{
+    channel::{Channel, Message},
+    error::builder,
+    error::Result,
+    msg::Request,
+};
 
 use super::{o_channel, MReceiver, MSender};
 
@@ -30,52 +28,42 @@ impl SocketAddr {
 }
 
 pub struct Stream {
-    channel: ChannelStream,
+    channel: Channel,
     address: SocketAddr,
 }
 
-use std::result::Result as StdResult;
-
-impl AsyncRead for Stream {
-    fn poll_read(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &mut ReadBuf<'_>,
-    ) -> Poll<io::Result<()>> {
-        pin!(&mut self.channel).poll_read(cx, buf)
-    }
-}
-
-impl AsyncWrite for Stream {
-    fn poll_write(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &[u8],
-    ) -> Poll<StdResult<usize, io::Error>> {
-        pin!(&mut self.channel).poll_write(cx, buf)
-    }
-
-    fn poll_flush(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-    ) -> Poll<StdResult<(), io::Error>> {
-        pin!(&mut self.channel).poll_flush(cx)
-    }
-
-    fn poll_shutdown(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-    ) -> Poll<StdResult<(), io::Error>> {
-        pin!(&mut self.channel).poll_shutdown(cx)
+impl Debug for Stream {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Stream")
+            .field("channel", &self.channel)
+            .field("address", &self.address)
+            .finish()
     }
 }
 
 impl Stream {
-    pub(crate) fn new(channel: Channel, address: SocketAddr) -> Self {
-        Self {
-            channel: ChannelStream::new(channel),
-            address,
+    pub async fn write(&self, data: impl Into<Vec<u8>>) -> Result<usize> {
+        self.channel.write(data).await
+    }
+
+    pub async fn read(&mut self) -> Result<Vec<u8>> {
+        let msg = self.channel.recv().await?;
+        match msg {
+            crate::channel::Message::Stdout(items) => Ok(items),
+            crate::channel::Message::Stderr(_) => builder::BadMessage {
+                tip: "unexpected message",
+            }
+            .fail(),
+            _ => builder::ChannelClosed {}.fail(),
         }
+    }
+
+    pub async fn message(&mut self) -> Result<Message> {
+        self.channel.recv().await
+    }
+
+    pub(crate) fn new(channel: Channel, address: SocketAddr) -> Self {
+        Self { channel, address }
     }
 
     pub async fn close(self) -> Result<()> {
@@ -88,21 +76,21 @@ impl Stream {
 }
 
 pub struct Listener {
-    session: ManuallyDrop<MSender<Request>>,
-    recver: ManuallyDrop<MReceiver<Stream>>,
-    address: ManuallyDrop<SocketAddr>,
+    session: Option<MSender<Request>>,
+    recver: MReceiver<Stream>,
+    address: SocketAddr,
     // port: u32,
 }
 
 impl Drop for Listener {
     fn drop(&mut self) {
-        let _ = self.session.send(Request::CancelTcpipForward {
-            address: (*self.address).clone(),
-            // port: self.port,
-            sender: None,
-        });
-
-        self.manually_drop();
+        if let Some(ref mut session) = self.session {
+            let _ = session.send(Request::CancelTcpipForward {
+                address: self.address.clone(),
+                // port: self.port,
+                sender: None,
+            });
+        }
     }
 }
 
@@ -114,9 +102,9 @@ impl Listener {
         // port: u32,
     ) -> Self {
         Self {
-            session: ManuallyDrop::new(session),
-            recver: ManuallyDrop::new(recver),
-            address: ManuallyDrop::new(address),
+            session: session.into(),
+            recver,
+            address,
             // port,
         }
     }
@@ -125,31 +113,33 @@ impl Listener {
         self.recver.recv().await.context(builder::Disconnected) //.ok_or(Error::Disconnected)
     }
 
-    fn manually_drop(&mut self) {
-        unsafe {
-            ManuallyDrop::drop(&mut self.session);
-            ManuallyDrop::drop(&mut self.recver);
-            ManuallyDrop::drop(&mut self.address);
-        }
-    }
+    // fn manually_drop(&mut self) {
+    //     unsafe {
+    //         ManuallyDrop::drop(&mut self.session);
+    //         ManuallyDrop::drop(&mut self.recver);
+    //         ManuallyDrop::drop(&mut self.address);
+    //     }
+    // }
 
     pub async fn cancel(mut self) -> Result<()> {
         let (sender, recver) = o_channel();
         let request = Request::CancelTcpipForward {
-            address: (*self.address).clone(),
+            address: self.address.clone(),
             // port: self.port,
             sender: Some(sender),
         };
 
         self.session
+            .as_ref()
+            .context(builder::BadOperation {
+                detail: "Listener has been cancelled",
+            })?
             .send(request)
             .map_err(|_| builder::Disconnected.build())?;
 
-        self.manually_drop();
-
-        mem::forget(self);
-
-        recver.await.map_err(|_| builder::Disconnected.build())?
+        recver.await.map_err(|_| builder::Disconnected.build())??;
+        self.session = None;
+        Ok(())
     }
 
     // pub fn listen_port(&self) -> u32 {

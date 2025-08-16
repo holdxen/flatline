@@ -1,3 +1,5 @@
+use std::fmt::Debug;
+
 use super::cipher::hash::Hash;
 use super::cipher::kex::Summary as DHSumary;
 use super::cipher::Boxtory;
@@ -34,6 +36,14 @@ pub struct Config<B> {
     pub key_strict: bool,
     pub behavior: Option<B>,
     pub(crate) ext: bool,
+}
+
+impl<B> Debug for Config<B> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Config")
+            .field("banner", &self.banner)
+            .finish()
+    }
 }
 
 // #[cfg(not(feature = "async-compatible"))]

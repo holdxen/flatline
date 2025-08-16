@@ -1,6 +1,5 @@
 use std::cmp::min;
 use std::collections::HashMap;
-use std::mem::ManuallyDrop;
 
 use super::channel::ChannelOpenFailureReson;
 use super::handshake;
@@ -34,6 +33,7 @@ use super::msg::Message;
 use super::msg::Request;
 use crate::ssh::stream::PlainStream;
 use derive_new::new;
+use snafu::OptionExt;
 use tokio::io::{AsyncRead, AsyncWrite};
 
 use super::{m_channel, o_channel};
@@ -122,37 +122,49 @@ impl DisconnectReson {
 }
 
 pub struct Session {
-    sender: ManuallyDrop<MSender<Request>>,
+    sender: Option<MSender<Request>>,
+}
+
+impl std::fmt::Debug for Session {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Session").finish()
+    }
 }
 
 impl Drop for Session {
     fn drop(&mut self) {
-        let request = Request::SessionDrop {
-            reson: DisconnectReson::BY_APPLICATION,
-            desc: "exit".to_string(),
-            sender: None,
-        };
-        let _ = self.sender.send(request);
-        self.manually_drop()
+        if let Some(ref mut sender) = self.sender {
+            let request = Request::SessionDrop {
+                reson: DisconnectReson::BY_APPLICATION,
+                desc: "exit".to_string(),
+                sender: None,
+            };
+
+            let _ = sender.send(request);
+        }
     }
 }
 
 impl Session {
     fn new(sender: MSender<Request>) -> Self {
         Self {
-            sender: ManuallyDrop::new(sender),
+            sender: sender.into(),
         }
     }
 
     fn send_request(&self, msg: Request) -> Result<()> {
         self.sender
+            .as_ref()
+            .context(builder::BadOperation {
+                detail: "Session has been disconnected",
+            })?
             .send(msg)
             .map_err(|_| builder::Disconnected.build())
     }
 
-    fn manually_drop(&mut self) {
-        unsafe { ManuallyDrop::drop(&mut self.sender) }
-    }
+    // fn manually_drop(&mut self) {
+    //     unsafe { ManuallyDrop::drop(&mut self.sender) }
+    // }
 
     pub async fn rexchange(&self) -> Result<()> {
         let (sender, recver) = o_channel();
@@ -247,8 +259,11 @@ impl Session {
         }
         .await;
 
-        self.manually_drop();
-        std::mem::forget(self);
+        // self.manually_drop();
+        // std::mem::forget(self);
+        //
+
+        self.sender = None;
 
         res
     }
@@ -370,6 +385,10 @@ impl Session {
         };
 
         self.sender
+            .as_ref()
+            .context(builder::BadOperation {
+                detail: "Session has been disconnected",
+            })?
             .send(request)
             .map_err(|_| builder::Disconnected.build())?;
         recver.await?

@@ -236,6 +236,13 @@ pub enum Error {
         backtrace: Backtrace,
         tip: String,
     },
+
+    #[snafu(display("Bad operation: {detail}"))]
+    BadOperation {
+        #[cfg(feature = "backtrace")]
+        backtrace: Backtrace,
+        detail: String,
+    },
 }
 
 // struct Unexpect {

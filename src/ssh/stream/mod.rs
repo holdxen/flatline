@@ -106,9 +106,13 @@ impl<T> BufferStream<T> {
         }
     }
 
-    pub fn into_inner(self) -> T {
-        self.socket
-    }
+    // pub fn inner_mut(&mut self) -> &mut T {
+    //     &mut self.socket
+    // }
+
+    // pub fn into_inner(self) -> T {
+    //     self.socket
+    // }
 
     // pub fn rbuffer(&self) -> &[u8] {
     //     &self.r_buf
@@ -172,16 +176,16 @@ impl<T: AsyncRead + Unpin> BufferStream<T> {
         Ok(size)
     }
 
-    pub async fn read_line_lf(&mut self) -> io::Result<Vec<u8>> {
-        loop {
-            // todo: improve performance
-            let pos = self.r_buf.iter().position(|&x| x == b'\n');
-            if let Some(pos) = pos {
-                return Ok(self.r_buf.split_to(pos + 1).to_vec());
-            }
-            self.internal_read().await?;
-        }
-    }
+    // pub async fn read_line_lf(&mut self) -> io::Result<Vec<u8>> {
+    //     loop {
+    //         // todo: improve performance
+    //         let pos = self.r_buf.iter().position(|&x| x == b'\n');
+    //         if let Some(pos) = pos {
+    //             return Ok(self.r_buf.split_to(pos + 1).to_vec());
+    //         }
+    //         self.internal_read().await?;
+    //     }
+    // }
 
     pub async fn read_line_crlf(&mut self) -> io::Result<Vec<u8>> {
         loop {
@@ -203,14 +207,14 @@ impl<T: AsyncRead + Unpin> BufferStream<T> {
     //     Ok(take(&mut self.r_buf).to_vec())
     // }
 
-    pub async fn read_buf(&mut self) -> io::Result<Vec<u8>> {
-        if self.r_buf.is_empty() {
-            self.socket.read_buf(&mut self.r_buf).await?;
-        }
-        let ret = self.r_buf.to_vec();
-        self.r_buf.clear();
-        Ok(ret)
-    }
+    // pub async fn read_buf(&mut self) -> io::Result<Vec<u8>> {
+    //     if self.r_buf.is_empty() {
+    //         self.socket.read_buf(&mut self.r_buf).await?;
+    //     }
+    //     let ret = self.r_buf.to_vec();
+    //     self.r_buf.clear();
+    //     Ok(ret)
+    // }
 
     pub async fn read_exact(&mut self, size: usize) -> io::Result<Vec<u8>> {
         while self.r_buf.len() < size {

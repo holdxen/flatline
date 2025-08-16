@@ -220,6 +220,16 @@ pub struct SFtp {
     packets: HashMap<u32, Packet>,
 }
 
+impl Debug for SFtp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SFtp")
+            .field("request_id", &self.request_id)
+            .field("version", &self.version)
+            .field("ext", &self.ext)
+            .finish()
+    }
+}
+
 impl SFtp {
     pub(crate) fn new(channel: Channel, version: u32, ext: HashMap<String, Vec<u8>>) -> Self {
         Self {
@@ -716,7 +726,7 @@ impl SFtp {
     pub async fn from_channel(channel: Channel) -> Result<Self> {
         let (sender, recver) = o_channel();
 
-        let session = channel.session();
+        let session = channel.session()?;
         let request = Request::SFtpFromChannel { channel, sender };
 
         session
@@ -1104,14 +1114,15 @@ impl SFtp {
         groups: &[u32],
     ) -> Result<(Vec<String>, Vec<String>)> {
         let request_id = self.genarate_request_id();
-        let cap = 4
-            + 1
-            + 4
-            + OPENSSH_SFTP_EXT_USERS_GROUPS_BY_ID.0.len()
-            + 4
-            + users.len() * 4
-            + 4
-            + groups.len() * 4;
+        let cap = 4 // buffer len
+            + 1 // ssh code
+            + 4 // request id
+            + 4 // extend string len
+            + OPENSSH_SFTP_EXT_USERS_GROUPS_BY_ID.0.len() // extend string content
+            + 4 // users id block len
+            + users.len() * 4 // users id
+            + 4 // groups id block len
+            + groups.len() * 4; // groups id
         let mut buffer = Buffer::with_capacity(cap);
         buffer.put_u32((cap - 4) as u32);
         buffer.put_u8(SSH_FXP_EXTENDED);

@@ -8,22 +8,12 @@ use derive_new::new;
 // use num_derive::FromPrimitive;
 use num_enum::TryFromPrimitive;
 use snafu::OptionExt;
-use std::cmp::min;
-use std::io;
-use std::mem::transmute;
-use std::mem::ManuallyDrop;
-use std::pin::Pin;
-use std::task::ready;
-use std::task::Context;
-use std::task::Poll;
-use tokio::io::AsyncRead;
-use tokio::io::AsyncWrite;
-use tokio::io::ReadBuf;
+use std::fmt::Debug;
 use tokio::sync::mpsc::error::TryRecvError;
 
 use super::error::Result;
 use super::msg::Request;
-use super::{o_channel, BoxFuture, MReceiver, MSender};
+use super::{o_channel, MReceiver, MSender};
 
 #[repr(transparent)]
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
@@ -41,7 +31,7 @@ pub struct Signal(pub String);
 
 impl std::fmt::Display for Signal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        self.0.fmt(f)
+        std::fmt::Display::fmt(&self.0, f)
     }
 }
 
@@ -83,6 +73,12 @@ pub enum ExitStatus {
     },
 }
 
+impl ExitStatus {
+    pub fn success(&self) -> bool {
+        matches!(self, Self::Normal(0))
+    }
+}
+
 // #[derive(Debug)]
 pub enum Message {
     /// It means the channel was closed by server, it can't be read or written;
@@ -106,216 +102,6 @@ impl std::fmt::Debug for Message {
             Self::Stdout(arg0) => write!(f, "Message::Stdout {{ len: {} }}", arg0.len()),
             Self::Stderr(arg0) => write!(f, "Message::Stderr {{ len: {} }}", arg0.len()),
             Self::Exit(arg0) => write!(f, "Message::Exit ( {:?} )", arg0),
-        }
-    }
-}
-
-pub struct Stream {
-    channel: Box<Channel>, // boxed due to self referencing
-
-    // be careful, self referencing here
-    read_future: Option<BoxFuture<'static, Result<Vec<u8>>>>,
-
-    // be careful, self referencing here
-    write_future: Option<BoxFuture<'static, Result<usize>>>,
-
-    stdout: BytesMut,
-
-    stderr: BytesMut,
-
-    pub rw_stdout: bool,
-
-    closed: bool,
-
-    eof: bool,
-}
-
-impl Stream {
-    pub fn new(channel: Channel) -> Self {
-        Self {
-            channel: Box::new(channel),
-            read_future: None,
-            write_future: None,
-            stdout: BytesMut::with_capacity(4096),
-            stderr: BytesMut::with_capacity(4096),
-            rw_stdout: true,
-            closed: false,
-            eof: false,
-        }
-    }
-
-    pub async fn close(self) -> Result<()> {
-        self.channel.close().await
-    }
-}
-
-impl AsyncWrite for Stream {
-    fn poll_write(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &[u8],
-    ) -> Poll<io::Result<usize>> {
-        if self.write_future.is_none() {
-            let future = self.channel.write(buf);
-            let future: BoxFuture<'_, Result<usize>> = Box::pin(future);
-
-            self.write_future = unsafe {
-                transmute::<
-                    Option<BoxFuture<'_, Result<usize>>>,
-                    Option<BoxFuture<'_, Result<usize>>>,
-                >(Some(future))
-            };
-        }
-        // we can't return Ok(0) here because Ok(0) means error in tokio::io::copy_bidirectional;
-        loop {
-            let res = ready!(self.write_future.as_mut().unwrap().as_mut().poll(cx));
-            self.write_future = None;
-            match res {
-                Ok(0) => {
-                    let future = async {
-                        tokio::task::yield_now().await;
-                        self.channel.write(buf).await
-                    };
-                    let future: BoxFuture<'_, Result<usize>> = Box::pin(future);
-
-                    self.write_future = unsafe {
-                        transmute::<
-                            Option<BoxFuture<'_, Result<usize>>>,
-                            Option<BoxFuture<'_, Result<usize>>>,
-                        >(Some(future))
-                    };
-                }
-                Ok(size) => break Poll::Ready(Ok(size)),
-                Err(err) => {
-                    break Poll::Ready(Err(io::Error::new(io::ErrorKind::Other, Box::new(err))))
-                }
-            }
-        }
-
-        // Poll::Ready(match res {
-        //     Ok(size) => Ok(size),
-        //     Err(err) => Err(io::Error::new(io::ErrorKind::Other, Box::new(err))),
-        // })
-    }
-
-    fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
-        Poll::Ready(Ok(()))
-    }
-
-    fn poll_shutdown(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
-        Poll::Ready(Ok(()))
-    }
-}
-
-impl AsyncRead for Stream {
-    fn poll_read(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &mut ReadBuf<'_>,
-    ) -> Poll<io::Result<()>> {
-        if self.read_future.is_none() {
-            let f = self.read_maximum(buf.remaining());
-            let f: Option<BoxFuture<'_, Result<Vec<u8>>>> = Some(Box::pin(f));
-
-            self.read_future = unsafe {
-                transmute::<
-                    Option<BoxFuture<'_, Result<Vec<u8>>>>,
-                    Option<BoxFuture<'_, Result<Vec<u8>>>>,
-                >(f)
-            };
-        }
-
-        let res = ready!(self.read_future.as_mut().unwrap().as_mut().poll(cx));
-        self.read_future = None;
-        Poll::Ready(match res {
-            Ok(data) => {
-                buf.put_slice(&data);
-                Ok(())
-            }
-            Err(err) => Err(io::Error::new(io::ErrorKind::Other, Box::new(err))),
-        })
-    }
-}
-
-impl Stream {
-    async fn read_maximum(&mut self, max: usize) -> Result<Vec<u8>> {
-        loop {
-            if self.rw_stdout {
-                if self.stdout.is_empty() {
-                    if self.closed {
-                        // return Err(Error::ChannelClosed);
-                        return builder::ChannelClosed.fail();
-                    }
-                    if self.eof {
-                        return Ok(vec![]);
-                    }
-                    let msg = self.channel.recv().await?;
-                    // println!("msg from channel: {:?}", msg);
-                    match msg {
-                        Message::Close => {
-                            self.closed = true;
-                            // return Err(Error::ChannelClosed);
-                            return builder::ChannelClosed.fail();
-                        }
-                        Message::Eof => {
-                            self.eof = true;
-                            return Ok(vec![]);
-                        }
-                        Message::Stdout(mut data) => {
-                            if data.len() <= max {
-                                return Ok(data);
-                            } else {
-                                self.stdout.extend(&data[max..]);
-                                data.truncate(max);
-                                return Ok(data);
-                            }
-                        }
-                        Message::Stderr(data) => {
-                            self.stderr.extend(data);
-                        }
-                        Message::Exit(_) => continue,
-                    }
-                } else {
-                    let min = min(max, self.stdout.len());
-                    return Ok(self.stdout.split_to(min).to_vec());
-                }
-            } else if self.stderr.is_empty() {
-                if self.closed {
-                    // return Err(Error::ChannelClosed);
-                    return builder::ChannelClosed.fail();
-                }
-                if self.eof {
-                    return Ok(vec![]);
-                }
-                let msg = self.channel.recv().await?;
-                match msg {
-                    Message::Close => {
-                        self.closed = true;
-                        // return Err(Error::ChannelClosed);
-                        return builder::ChannelClosed.fail();
-                    }
-                    Message::Eof => {
-                        self.eof = true;
-                        return Ok(vec![]);
-                    }
-                    Message::Stdout(data) => {
-                        self.stdout.extend(data);
-                    }
-                    Message::Stderr(mut data) => {
-                        if data.len() <= max {
-                            return Ok(data);
-                        } else {
-                            self.stderr.extend(&data[max..]);
-                            data.truncate(max);
-                            return Ok(data);
-                        }
-                    }
-                    Message::Exit(_) => continue,
-                }
-            } else {
-                let min = min(max, self.stderr.len());
-                return Ok(self.stderr.split_to(min).to_vec());
-            }
         }
     }
 }
@@ -498,12 +284,24 @@ impl BufferChannel {
 
 pub struct Channel {
     pub(crate) id: u32,
-    recver: ManuallyDrop<Option<MReceiver<Message>>>,
-    session: ManuallyDrop<MSender<Request>>,
+    recver: Option<MReceiver<Message>>,
+    session: Option<MSender<Request>>,
+}
+
+impl Debug for Channel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Channel").field("id", &self.id).finish()
+    }
 }
 
 pub struct Receiver {
     recver: MReceiver<Message>,
+}
+
+impl Debug for Receiver {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Receiver").finish()
+    }
 }
 
 impl Receiver {
@@ -522,11 +320,12 @@ impl Receiver {
 
 impl Drop for Channel {
     fn drop(&mut self) {
-        let _ = self.session.send(Request::ChannelDrop {
-            id: self.id,
-            sender: None,
-        });
-        self.manually_drop()
+        if let Some(ref mut session) = self.session {
+            let _ = session.send(Request::ChannelDrop {
+                id: self.id,
+                sender: None,
+            });
+        }
     }
 }
 
@@ -534,32 +333,41 @@ impl Channel {
     pub(crate) fn new(id: u32, channel: MReceiver<Message>, session: MSender<Request>) -> Self {
         Self {
             id,
-            recver: ManuallyDrop::new(Some(channel)),
-            session: ManuallyDrop::new(session),
+            recver: channel.into(),
+            session: session.into(),
         }
     }
 
-    fn manually_drop(&mut self) {
-        unsafe {
-            ManuallyDrop::drop(&mut self.recver);
-            ManuallyDrop::drop(&mut self.session);
-        }
-    }
+    // fn manually_drop(&mut self) {
+    //     unsafe {
+    //         ManuallyDrop::drop(&mut self.recver);
+    //         ManuallyDrop::drop(&mut self.session);
+    //     }
+    // }
 
-    async fn close_without_drop(&self) -> Result<()> {
+    // async fn close_without_drop(&self) -> Result<()> {
+    //     let (sender, recver) = o_channel();
+    //     self.send_request(Request::ChannelDrop {
+    //         id: self.id,
+    //         sender: Some(sender),
+    //     })?;
+    //     recver.await?
+    // }
+
+    pub async fn close(mut self) -> Result<()> {
+        // let res = self.close_without_drop().await;
+        // self.manually_drop();
+        // std::mem::forget(self);
+        // res
         let (sender, recver) = o_channel();
         self.send_request(Request::ChannelDrop {
             id: self.id,
             sender: Some(sender),
         })?;
-        recver.await?
-    }
-
-    pub async fn close(mut self) -> Result<()> {
-        let res = self.close_without_drop().await;
-        self.manually_drop();
-        std::mem::forget(self);
-        res
+        recver.await??;
+        self.recver = None;
+        self.session = None;
+        Ok(())
     }
 
     pub async fn send_signal(&self, signal: impl Into<Signal>) -> Result<()> {
@@ -604,13 +412,13 @@ impl Channel {
         recver.await?
     }
 
-    pub fn merge_receiver(&mut self, recver: Receiver) -> std::result::Result<(), Receiver> {
-        if self.recver.is_some() {
-            return Err(recver);
-        }
-        *self.recver = Some(recver.recver);
-        Ok(())
-    }
+    // pub fn merge_receiver(&mut self, recver: Receiver) -> std::result::Result<(), Receiver> {
+    //     if self.recver.is_some() {
+    //         return Err(recver);
+    //     }
+    //     *self.recver = Some(recver.recver);
+    //     Ok(())
+    // }
 
     pub fn take_receiver(&mut self) -> Option<Receiver> {
         self.recver.take().map(|r| Receiver { recver: r })
@@ -765,12 +573,18 @@ impl Channel {
 
     fn send_request(&self, msg: Request) -> Result<()> {
         self.session
+            .as_ref()
+            .context(builder::BadOperation {
+                detail: "Channel has been closed",
+            })?
             .send(msg)
             .map_err(|_| builder::Disconnected.build()) //.map_err(|_| Error::Disconnected)
     }
 
-    pub(crate) fn session(&self) -> MSender<Request> {
-        (*self.session).clone()
+    pub(crate) fn session(&self) -> Result<MSender<Request>> {
+        self.session.clone().context(builder::BadOperation {
+            detail: "Channel has been closed",
+        })
     }
 }
 
