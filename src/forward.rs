@@ -1,4 +1,4 @@
-use std::fmt::Debug;
+use std::{fmt::Debug, str::FromStr};
 
 use derive_new::new;
 use snafu::OptionExt;
@@ -16,6 +16,41 @@ use super::{o_channel, MReceiver, MSender};
 pub struct SocketAddr {
     pub host: String,
     pub port: u32,
+}
+
+impl FromStr for SocketAddr {
+    type Err = crate::error::Error;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        let parts: Vec<_> = s.split(':').collect();
+
+        if parts.len() != 2 {
+            return builder::InvalidFormat {
+                tip: "Address must be {{address}}:{{port}}",
+            }
+            .fail();
+        }
+
+        let port = u32::from_str(parts[1])
+            .ok()
+            .context(builder::InvalidFormat {
+                tip: "Invalid port",
+            })?;
+
+        Ok(Self {
+            host: parts[0].to_string(),
+            port,
+        })
+    }
+}
+
+impl From<std::net::SocketAddr> for SocketAddr {
+    fn from(value: std::net::SocketAddr) -> Self {
+        Self {
+            host: value.ip().to_string(),
+            port: value.port().into(),
+        }
+    }
 }
 
 impl SocketAddr {
