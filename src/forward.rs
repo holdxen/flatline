@@ -15,7 +15,7 @@ use super::{o_channel, MReceiver, MSender};
 #[derive(Debug, Clone, PartialEq, Eq, Hash, new)]
 pub struct SocketAddr {
     pub host: String,
-    pub port: u32,
+    pub port: u16,
 }
 
 impl FromStr for SocketAddr {
@@ -26,12 +26,12 @@ impl FromStr for SocketAddr {
 
         if parts.len() != 2 {
             return builder::InvalidFormat {
-                tip: "Address must be {{address}}:{{port}}",
+                tip: "Address must be address:port",
             }
             .fail();
         }
 
-        let port = u32::from_str(parts[1])
+        let port = u16::from_str(parts[1])
             .ok()
             .context(builder::InvalidFormat {
                 tip: "Invalid port",
@@ -48,7 +48,7 @@ impl From<std::net::SocketAddr> for SocketAddr {
     fn from(value: std::net::SocketAddr) -> Self {
         Self {
             host: value.ip().to_string(),
-            port: value.port().into(),
+            port: value.port(),
         }
     }
 }

@@ -20,7 +20,6 @@ use crate::ssh::buffer::Buffer;
 use derive_new::new;
 use indexmap::IndexMap;
 use openssl::rand::rand_bytes;
-use snafu::ResultExt;
 use tokio::io::{AsyncRead, AsyncWrite};
 
 pub struct Config<B> {
@@ -365,7 +364,7 @@ pub(crate) async fn method_exchange<B: Behavior>(
 
     let mut randbytes = [0; 16];
 
-    rand_bytes(&mut randbytes).context(builder::Openssl)?;
+    rand_bytes(&mut randbytes)?;
 
     let mut buffer = Buffer::new();
     buffer.put_u8(SSH_MSG_KEXINIT);
@@ -515,7 +514,7 @@ pub(crate) async fn method_exchange_with_payload<B: Behavior>(
 
     let mut randbytes = [0; 16];
 
-    rand_bytes(&mut randbytes).context(builder::Openssl)?;
+    rand_bytes(&mut randbytes)?;
 
     let mut buffer = Buffer::new();
     buffer.put_u8(SSH_MSG_KEXINIT);

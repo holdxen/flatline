@@ -120,12 +120,12 @@ impl<'a> Stream<'a> {
         match res {
             Ok(data) => {
                 if data.len() > buf.remaining() {
-                    return Poll::Ready(Err(io::Error::new(io::ErrorKind::Other, "data too long")));
+                    return Poll::Ready(Err(io::Error::other("data too long")));
                 }
                 buf.put_slice(&data);
                 Poll::Ready(Ok(()))
             }
-            Err(err) => Poll::Ready(Err(io::Error::new(io::ErrorKind::Other, Box::new(err)))),
+            Err(err) => Poll::Ready(Err(io::Error::other(Box::new(err)))),
         }
     }
 
@@ -145,7 +145,7 @@ impl<'a> Stream<'a> {
 
         match res {
             Ok(_) => Poll::Ready(Ok(buf.len())),
-            Err(err) => Poll::Ready(Err(io::Error::new(io::ErrorKind::Other, Box::new(err)))),
+            Err(err) => Poll::Ready(Err(io::Error::other(Box::new(err)))),
         }
     }
 }

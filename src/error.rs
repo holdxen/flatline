@@ -12,6 +12,7 @@ use snafu::{IntoError, Snafu};
 #[derive(Snafu, Debug)]
 #[snafu(module(builder), context(suffix(false)), visibility(pub))]
 pub enum Error {
+    #[snafu(context(false))]
     #[snafu(display("Openssl error"))]
     OpensslError {
         #[cfg(feature = "backtrace")]
@@ -230,11 +231,11 @@ pub enum Error {
         backtrace: Backtrace,
     },
 
-    #[snafu(display("Other error: {tip}"))]
-    Other {
-        #[cfg(feature = "backtrace")]
-        backtrace: Backtrace,
-        tip: String,
+    #[snafu(whatever, display("{message}:{source:?}"))]
+    Whatever {
+        message: String,
+        #[snafu(source(from(Box<dyn std::error::Error + Send + Sync + 'static>, Some)))]
+        source: Option<Box<dyn std::error::Error + Send + Sync + 'static>>,
     },
 
     #[snafu(display("Bad operation: {detail}"))]
@@ -266,10 +267,6 @@ impl Error {
     pub fn invalid_format(tip: impl Into<String>) -> Self {
         builder::InvalidFormat { tip }.build()
     }
-
-    pub fn other(tip: impl Into<String>) -> Self {
-        builder::Other { tip }.build()
-    }
 }
 
 impl From<RecvError> for Error {
@@ -287,11 +284,5 @@ impl From<io::Error> for Error {
 impl From<Utf8Error> for Error {
     fn from(value: Utf8Error) -> Self {
         builder::Utf8.into_error(value)
-    }
-}
-
-impl From<ErrorStack> for Error {
-    fn from(value: ErrorStack) -> Self {
-        builder::Openssl.into_error(value)
     }
 }

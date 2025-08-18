@@ -34,6 +34,7 @@ use super::msg::Request;
 use crate::ssh::stream::PlainStream;
 use derive_new::new;
 use snafu::OptionExt;
+use snafu::ResultExt;
 use tokio::io::{AsyncRead, AsyncWrite};
 
 use super::{m_channel, o_channel};
@@ -905,7 +906,12 @@ where
 
             let socket = Stream::new(
                 channel,
-                SocketAddr::new(originator_address, originator_port),
+                SocketAddr::new(
+                    originator_address,
+                    originator_port
+                        .try_into()
+                        .whatever_context::<_, Error>("Invalid port")?,
+                ),
             );
 
             behavior.x11_forward(socket).await?;
@@ -935,7 +941,12 @@ where
         originator_address: String,
         originator_port: u32,
     ) -> Result<()> {
-        let listen = SocketAddr::new(listen_address, listen_port);
+        let listen = SocketAddr::new(
+            listen_address,
+            listen_port
+                .try_into()
+                .whatever_context::<_, Error>("Invalid port")?,
+        );
 
         let mut buffer = Buffer::with_capacity(128);
         match self.listeners.get(&listen) {
@@ -967,7 +978,12 @@ where
 
                 let socket = Stream::new(
                     channel,
-                    SocketAddr::new(originator_address, originator_port),
+                    SocketAddr::new(
+                        originator_address,
+                        originator_port
+                            .try_into()
+                            .whatever_context::<_, Error>("Invalid port")?,
+                    ),
                 );
                 let _ = listener.sender.send(socket);
             }
@@ -1609,9 +1625,9 @@ where
             u32: initial,
             u32: maximum,
             one: remote.host,
-            u32: remote.port,
+            u32: remote.port as u32,
             one: local.host,
-            u32: local.port
+            u32: local.port as u32
         };
 
         self.stream.send_payload(buffer).await?;
@@ -1667,7 +1683,7 @@ where
             one: "cancel-tcpip-forward",
             u8: 1,
             one: &address.host,
-            u32: address.port,
+            u32: address.port as u32,
         };
 
         self.stream.send_payload(buffer).await?;
@@ -1720,7 +1736,7 @@ where
             one: "tcpip-forward",
             u8: 1,
             one: &address.host,
-            u32: address.port,
+            u32: address.port as u32,
         };
 
         self.stream.send_payload(buffer).await?;
@@ -1734,7 +1750,9 @@ where
                     if address.port == 0 {
                         address.port = payload
                             .take_u32()
-                            .ok_or(Error::invalid_format("Invalid port"))?;
+                            .ok_or(Error::invalid_format("Invalid port"))?
+                            .try_into()
+                            .whatever_context::<_, Error>("Invalid port")?;
                     }
                     let (sender, recver) = m_channel();
 

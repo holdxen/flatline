@@ -1,6 +1,5 @@
 use crate::cipher::crypt;
 use crate::cipher::crypt::Decrypt;
-use crate::error::builder;
 use crate::error::Error;
 use crate::error::Result;
 use crate::ssh::buffer::Buffer;
@@ -12,7 +11,6 @@ use openssl::bn::BigNumContext;
 use openssl::ec::PointConversionForm;
 use openssl::nid::Nid;
 use openssl::pkey;
-use snafu::ResultExt;
 use std::collections::HashMap;
 
 #[derive(new)]
@@ -61,7 +59,7 @@ impl KeyParser {
         }
         Ok(PublicKey::new(
             parts[0].to_string(),
-            decode_block(parts[1]).context(builder::Openssl)?,
+            decode_block(parts[1])?,
         ))
     }
 
@@ -84,12 +82,11 @@ impl KeyParser {
                 pkey::PKey::private_key_from_pem_passphrase(binary, passphrase)
             } else {
                 pkey::PKey::private_key_from_pem(binary)
-            }
-            .context(builder::Openssl)?;
+            }?;
 
             match pkey.id() {
                 pkey::Id::RSA => {
-                    let rsa = pkey.rsa().context(builder::Openssl)?;
+                    let rsa = pkey.rsa()?;
                     let e = rsa.e().to_ssh_bytes();
                     let n = rsa.n().to_ssh_bytes();
 
@@ -123,7 +120,7 @@ impl KeyParser {
                     ));
                 }
                 pkey::Id::DSA => {
-                    let dsa = pkey.dsa().context(builder::Openssl)?;
+                    let dsa = pkey.dsa()?;
                     let p = dsa.p().to_ssh_bytes();
                     let q = dsa.q().to_ssh_bytes();
                     let g = dsa.g().to_ssh_bytes();
@@ -156,7 +153,7 @@ impl KeyParser {
                     ));
                 }
                 pkey::Id::EC => {
-                    let ec = pkey.ec_key().context(builder::Openssl)?;
+                    let ec = pkey.ec_key()?;
                     let group = ec.group();
                     let curve = group
                         .curve_name()
@@ -169,11 +166,12 @@ impl KeyParser {
                         _ => return Err(Error::invalid_format("Invalid SSH key type")),
                     };
 
-                    let mut ctx = BigNumContext::new().context(builder::Openssl)?;
-                    let point = ec
-                        .public_key()
-                        .to_bytes(group, PointConversionForm::UNCOMPRESSED, &mut ctx)
-                        .context(builder::Openssl)?;
+                    let mut ctx = BigNumContext::new()?;
+                    let point = ec.public_key().to_bytes(
+                        group,
+                        PointConversionForm::UNCOMPRESSED,
+                        &mut ctx,
+                    )?;
 
                     let e = ec.private_key().to_ssh_bytes();
 
@@ -210,7 +208,7 @@ impl KeyParser {
             .trim_start_matches("-----BEGIN OPENSSH PRIVATE KEY-----")
             .trim_end_matches("-----END OPENSSH PRIVATE KEY-----");
 
-        let decode = decode_block(content).context(builder::Openssl)?;
+        let decode = decode_block(content)?;
         let decode = Buffer::from_slice(&decode);
 
         let key = b"openssh-key-v1\0";

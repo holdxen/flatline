@@ -12,7 +12,6 @@ use crate::{
 };
 use bytes::{BufMut, BytesMut};
 use openssl::rand::rand_bytes;
-use snafu::ResultExt;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 #[async_trait::async_trait]
@@ -386,7 +385,7 @@ where
 
         let mut rand_padding = vec![0u8; padding_len];
 
-        rand_bytes(&mut rand_padding).context(builder::Openssl)?;
+        rand_bytes(&mut rand_padding)?;
 
         let packet_len = payload_len + padding_len + 1;
 
@@ -806,7 +805,7 @@ where
         let mut rand_padding = vec![0u8; padding_len];
 
         // 生成随机padding
-        rand_bytes(&mut rand_padding).context(builder::Openssl)?;
+        rand_bytes(&mut rand_padding)?;
 
         packet.put_u8(padding_len as u8);
 
