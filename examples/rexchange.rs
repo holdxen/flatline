@@ -9,7 +9,7 @@ include!("./user.conf");
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
     let socket = TcpStream::connect(HOST).await.unwrap();
-    let mut config = Config::deafult_with_behavior();
+    let mut config = Config::default_with_behavior();
     config.disable_compress();
     // config.key_strict = false;
     let session = Session::handshake(config, socket).await.unwrap();

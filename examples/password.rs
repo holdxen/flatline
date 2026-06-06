@@ -8,7 +8,7 @@ include!("./user.conf");
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> flatline::error::Result<()> {
     let socket = TcpStream::connect(HOST).await?;
-    let config = Config::deafult_with_behavior();
+    let config = Config::default_with_behavior();
     let session = Session::handshake(config, socket).await?;
 
     let status = session.userauth_password(USERNAME, PASSWORD).await?;

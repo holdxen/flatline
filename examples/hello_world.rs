@@ -9,7 +9,7 @@ include!("./user.conf");
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
     let socket = TcpStream::connect(HOST).await.unwrap();
-    let config = Config::deafult_with_behavior();
+    let config = Config::default_with_behavior();
     let session = Session::handshake(config, socket).await.unwrap();
 
     let status = session.userauth_password(USERNAME, PASSWORD).await.unwrap();

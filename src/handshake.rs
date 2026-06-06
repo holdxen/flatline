@@ -86,7 +86,7 @@ pub trait Behavior {
 }
 
 impl Config<DefaultBehavior> {
-    pub fn deafult_with_behavior() -> Self {
+    pub fn default_with_behavior() -> Self {
         Self::default()
     }
 }
