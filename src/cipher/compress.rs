@@ -24,12 +24,12 @@ algo_list!(
     "none" => Never::default(),
 );
 
-pub fn none_encode() -> Boxtory<dyn Encode + Send> {
-    create_boxtory!(Never::default())
+pub fn none_encode() -> AlgoFactory<dyn Encode + Send> {
+    create_factory!(Never::default())
 }
 
-pub fn none_decode() -> Boxtory<dyn Decode + Send> {
-    create_boxtory!(Never::default())
+pub fn none_decode() -> AlgoFactory<dyn Decode + Send> {
+    create_factory!(Never::default())
 }
 
 pub trait Encode {

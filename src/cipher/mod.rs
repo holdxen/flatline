@@ -1,4 +1,4 @@
-macro_rules! create_boxtory {
+macro_rules! create_factory {
     ($ex:expr) => {
         Box::new(|| Box::new($ex) as _)
     };
@@ -18,15 +18,15 @@ macro_rules! algo_list {
             ]
         }
 
-        pub fn $new_all() -> IndexMap<&'static str, Boxtory<$t>> {
-            let mut res: IndexMap<&'static str, Boxtory<$t>> = IndexMap::new();
+        pub fn $new_all() -> IndexMap<&'static str, AlgoFactory<$t>> {
+            let mut res: IndexMap<&'static str, AlgoFactory<$t>> = IndexMap::new();
             $(
                 res.insert($key,  Box::new(|| Box::new($value) as _));
             )*
             res
         }
 
-        pub fn $new_by_name(name: &str) -> Option<Boxtory<$t>> {
+        pub fn $new_by_name(name: &str) -> Option<AlgoFactory<$t>> {
             match name {
                 $($key => Some(Box::new(|| Box::new($value) as _)),)*
                 _ => None,
@@ -43,19 +43,7 @@ pub mod kex;
 pub mod mac;
 pub mod sign;
 
-pub trait Factory<T> {
-    fn create(&self) -> T;
-}
-
-impl<T, F> Factory<T> for F
-where
-    F: Fn() -> T,
-{
-    fn create(&self) -> T {
-        self()
-    }
-}
-
-pub type Boxtory<T> = Box<dyn Factory<Box<T>> + Send + Sync>;
+/// 算法工厂：一个可重复调用的闭包，每次调用创建一个新的算法实例。
+pub type AlgoFactory<T> = Box<dyn Fn() -> Box<T> + Send + Sync>;
 
 // trait Backend {}

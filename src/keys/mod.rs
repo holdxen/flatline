@@ -4,7 +4,7 @@ use crate::error::Error;
 use crate::error::Result;
 use crate::ssh::buffer::Buffer;
 use crate::BigNumExt;
-use crate::Boxtory;
+use crate::AlgoFactory;
 use derive_new::new;
 use openssl::base64::decode_block;
 use openssl::bn::BigNumContext;
@@ -34,7 +34,7 @@ pub struct PublicKey {
 // }
 
 pub struct KeyParser {
-    cipher: HashMap<String, Boxtory<dyn Decrypt + Send>>,
+    cipher: HashMap<String, AlgoFactory<dyn Decrypt + Send>>,
 }
 
 impl Default for KeyParser {
@@ -276,7 +276,7 @@ impl KeyParser {
                         .cipher
                         .get(std::str::from_utf8(cipher)?)
                         .ok_or(Error::invalid_format("unsupport cipher type"))?
-                        .create();
+                        ();
 
                     cipher.enable_increase_iv(false);
 
@@ -503,7 +503,7 @@ impl KeyParser {
         ))
     }
 
-    pub fn add_cipher(&mut self, name: &str, cipher: Boxtory<dyn Decrypt + Send>) {
+    pub fn add_cipher(&mut self, name: &str, cipher: AlgoFactory<dyn Decrypt + Send>) {
         self.cipher.insert(name.to_string(), cipher);
     }
 }

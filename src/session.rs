@@ -685,7 +685,7 @@ where
             }
             Message::UserauthBanner { msg, tag } => {
                 if let Some(behavior) = self.behaviour() {
-                    behavior.useauth_banner(&msg, &tag).await?;
+                    behavior.userauth_banner(&msg, &tag).await?;
                 }
             }
             Message::Debug {
@@ -2326,9 +2326,8 @@ where
             one: publickey,
         };
 
-        let mut algo = sign::new_signature_by_name(method)
-            .ok_or(Error::ub("Unable to create cipher"))?
-            .create();
+        let mut algo =
+            sign::new_signature_by_name(method).ok_or(Error::ub("Unable to create cipher"))?();
 
         algo.initialize(privatekey.as_ref())?;
         let sign = algo.signature(buffer.as_ref())?;

@@ -69,10 +69,10 @@ pub use cipher::{
     compress::{Decode, Encode},
     crypt::{Decrypt, Encrypt},
     hash::Hash,
-    kex::KeyExChange,
+    kex::{KeyExChange, KexAlgorithm, StandardKexProtocol},
     mac::Mac,
     sign::{Signature, Verify},
-    Boxtory, Factory,
+    AlgoFactory,
 };
 pub use openssl;
 use tokio::sync::{mpsc, oneshot};

@@ -124,8 +124,8 @@ algo_list!(
     // ),
 );
 
-pub fn none() -> Boxtory<dyn Mac + Send> {
-    create_boxtory!(Never {})
+pub fn none() -> AlgoFactory<dyn Mac + Send> {
+    create_factory!(Never {})
 }
 
 struct Never;

@@ -2,7 +2,7 @@ use std::fmt::Debug;
 
 use super::cipher::hash::Hash;
 use super::cipher::kex::Summary as DHSumary;
-use super::cipher::Boxtory;
+use super::cipher::AlgoFactory;
 use super::error::{Error, Result};
 use super::forward::Stream as ForwardStream;
 use super::session::DisconnectReson;
@@ -23,15 +23,15 @@ use openssl::rand::rand_bytes;
 use tokio::io::{AsyncRead, AsyncWrite};
 
 pub struct Config<B> {
-    pub(crate) banner: String, //
-    pub key_exchange: IndexMap<String, Boxtory<dyn KeyExChange + Send>>,
-    pub hostkey: IndexMap<String, Boxtory<dyn Verify + Send>>,
-    pub crypt_client_to_server: IndexMap<String, Boxtory<dyn Encrypt + Send>>,
-    pub crypt_server_to_client: IndexMap<String, Boxtory<dyn Decrypt + Send>>,
-    pub mac_client_to_server: IndexMap<String, Boxtory<dyn Mac + Send>>,
-    pub mac_server_to_client: IndexMap<String, Boxtory<dyn Mac + Send>>,
-    pub compress_client_to_server: IndexMap<String, Boxtory<dyn Encode + Send>>,
-    pub compress_server_to_client: IndexMap<String, Boxtory<dyn Decode + Send>>,
+    pub(crate) banner: String,
+    pub key_exchange: IndexMap<String, AlgoFactory<dyn KeyExChange + Send>>,
+    pub hostkey: IndexMap<String, AlgoFactory<dyn Verify + Send>>,
+    pub crypt_client_to_server: IndexMap<String, AlgoFactory<dyn Encrypt + Send>>,
+    pub crypt_server_to_client: IndexMap<String, AlgoFactory<dyn Decrypt + Send>>,
+    pub mac_client_to_server: IndexMap<String, AlgoFactory<dyn Mac + Send>>,
+    pub mac_server_to_client: IndexMap<String, AlgoFactory<dyn Mac + Send>>,
+    pub compress_client_to_server: IndexMap<String, AlgoFactory<dyn Encode + Send>>,
+    pub compress_server_to_client: IndexMap<String, AlgoFactory<dyn Decode + Send>>,
     pub key_strict: bool,
     pub behavior: Option<B>,
     pub(crate) ext: bool,
@@ -78,7 +78,7 @@ pub trait Behavior {
     async fn openssh_hostkeys(&mut self, want_reply: bool, hostkeys: &[&[u8]]) -> Result<()>;
     async fn debug(&mut self, always_display: bool, msg: &str, tag: &str) -> Result<()>;
     async fn ignore(&mut self, data: &[u8]) -> Result<()>;
-    async fn useauth_banner(&mut self, msg: &str, tag: &str) -> Result<()>;
+    async fn userauth_banner(&mut self, msg: &str, tag: &str) -> Result<()>;
     async fn disconnect(&mut self, reson: DisconnectReson, dest: &str, tag: &str) -> Result<()>;
     async fn verify_server_hostkey(&mut self, keytype: &str, hostkeys: &[u8]) -> Result<bool>;
     async fn server_signature_algorithms(&mut self, algorithms: &[&str]) -> Result<()>;
@@ -135,7 +135,7 @@ impl Behavior for DefaultBehavior {
         Ok(())
     }
 
-    async fn useauth_banner(&mut self, _: &str, _: &str) -> Result<()> {
+    async fn userauth_banner(&mut self, _: &str, _: &str) -> Result<()> {
         Ok(())
     }
 
@@ -219,6 +219,121 @@ impl<B> Config<B> {
             behavior: Some(behaviour),
             ext: false,
         }
+    }
+
+    /// 创建一个 `ConfigBuilder` 用于增量修改配置。
+    pub fn builder(self) -> ConfigBuilder<B> {
+        ConfigBuilder { config: self }
+    }
+}
+
+/// 配置构建器，支持链式 API 注册/移除算法。
+pub struct ConfigBuilder<B> {
+    config: Config<B>,
+}
+
+impl<B> ConfigBuilder<B> {
+    /// 添加自定义 KEX 算法（最高优先级，插入到列表头部）。
+    pub fn add_kex(
+        mut self,
+        name: impl Into<String>,
+        factory: AlgoFactory<dyn KeyExChange + Send>,
+    ) -> Self {
+        self.config
+            .key_exchange
+            .shift_insert(0, name.into(), factory);
+        self
+    }
+
+    /// 移除指定的 KEX 算法。
+    pub fn remove_kex(mut self, name: &str) -> Self {
+        self.config.key_exchange.shift_remove(name);
+        self
+    }
+
+    /// 添加自定义主机密钥验证算法。
+    pub fn add_hostkey(
+        mut self,
+        name: impl Into<String>,
+        factory: AlgoFactory<dyn Verify + Send>,
+    ) -> Self {
+        self.config.hostkey.shift_insert(0, name.into(), factory);
+        self
+    }
+
+    /// 移除指定的主机密钥验证算法。
+    pub fn remove_hostkey(mut self, name: &str) -> Self {
+        self.config.hostkey.shift_remove(name);
+        self
+    }
+
+    /// 添加自定义加密算法（client→server 方向）。
+    pub fn add_encrypt(
+        mut self,
+        name: impl Into<String>,
+        factory: AlgoFactory<dyn Encrypt + Send>,
+    ) -> Self {
+        self.config
+            .crypt_client_to_server
+            .shift_insert(0, name.into(), factory);
+        self
+    }
+
+    /// 添加自定义解密算法（server→client 方向）。
+    pub fn add_decrypt(
+        mut self,
+        name: impl Into<String>,
+        factory: AlgoFactory<dyn Decrypt + Send>,
+    ) -> Self {
+        self.config
+            .crypt_server_to_client
+            .shift_insert(0, name.into(), factory);
+        self
+    }
+
+    /// 添加自定义 MAC 算法（同时用于 c2s 和 s2c）。
+    pub fn add_mac(
+        mut self,
+        name: impl Into<String>,
+        factory_c2s: AlgoFactory<dyn Mac + Send>,
+        factory_s2c: AlgoFactory<dyn Mac + Send>,
+    ) -> Self {
+        let name = name.into();
+        self.config
+            .mac_client_to_server
+            .shift_insert(0, name.clone(), factory_c2s);
+        self.config
+            .mac_server_to_client
+            .shift_insert(0, name, factory_s2c);
+        self
+    }
+
+    /// 添加自定义压缩算法（同时用于 c2s 和 s2c）。
+    pub fn add_compress(
+        mut self,
+        name: impl Into<String>,
+        factory_encode: AlgoFactory<dyn Encode + Send>,
+        factory_decode: AlgoFactory<dyn Decode + Send>,
+    ) -> Self {
+        let name = name.into();
+        self.config
+            .compress_client_to_server
+            .shift_insert(0, name.clone(), factory_encode);
+        self.config
+            .compress_server_to_client
+            .shift_insert(0, name, factory_decode);
+        self
+    }
+
+    /// 禁用压缩。
+    pub fn disable_compress(mut self) -> Self {
+        self.config.disable_compress();
+        self
+    }
+
+    /// 构建最终 Config。
+    pub fn build(self) -> Config<B> {
+        self.config
     }
 }
 
@@ -788,47 +903,47 @@ pub(crate) fn match_method<B: Behavior>(
         ) => {
             let mut server_mac = None;
             let mut client_mac = None;
-            let server_crypt = server_crypt.create();
+            let server_crypt = server_crypt();
             if server_crypt.has_tag() {
-                server_mac = Some(mac::none().create());
+                server_mac = Some(mac::none()());
             } else {
                 for i in &client.mac_server_to_client {
                     if server.mac_server_to_client.contains(i) {
-                        server_mac = config.mac_server_to_client.get(i).map(|v| v.create());
+                        server_mac = config.mac_server_to_client.get(i).map(|v| v());
                         break;
                     }
                 }
             }
 
-            let client_crypt = client_crypt.create();
+            let client_crypt = client_crypt();
 
             if client_crypt.has_tag() {
-                client_mac = Some(mac::none().create());
+                client_mac = Some(mac::none()());
             } else {
                 for i in &client.mac_client_to_server {
                     if server.mac_client_to_server.contains(i) {
-                        client_mac = config.mac_client_to_server.get(i).map(|v| v.create());
+                        client_mac = config.mac_client_to_server.get(i).map(|v| v());
                         break;
                     }
                 }
             }
 
-            match (client_mac, server_mac) {
-                (Some(client_mac), Some(server_mac)) => Ok(MatchMethod::new(
-                    kex.create(),
-                    hostkey.create(),
-                    server_crypt,
-                    client_crypt,
-                    server_mac,
-                    client_mac,
-                    server_compress.create(),
-                    client_compress.create(),
-                )),
-                _ => builder::NegotiationFailed.fail(), //Err(Error::NegotiationFailed),
-            }
+            let (Some(client_mac), Some(server_mac)) = (client_mac, server_mac) else {
+                return builder::NegotiationFailed.fail();
+            };
+
+            Ok(MatchMethod::new(
+                kex(),
+                hostkey(),
+                server_crypt,
+                client_crypt,
+                server_mac,
+                client_mac,
+                server_compress(),
+                client_compress(),
+            ))
         }
-        _ => builder::NegotiationFailed.fail(), //Err(Error::NegotiationFailed),
-                                                // _ => Err(Error::NegotiationFailed),
+        _ => builder::NegotiationFailed.fail(),
     }
 }
 
