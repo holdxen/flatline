@@ -807,7 +807,7 @@ pub(crate) fn match_method<B: Behavior>(
             } else {
                 for i in &client.mac_client_to_server {
                     if server.mac_client_to_server.contains(i) {
-                        client_mac = config.mac_server_to_client.get(i).map(|v| v.create());
+                        client_mac = config.mac_client_to_server.get(i).map(|v| v.create());
                         break;
                     }
                 }
