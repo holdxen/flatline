@@ -166,6 +166,7 @@ impl<'a> Buffer<Cell<&'a [u8]>> {
         } as usize;
 
         if self.len() < len {
+            self.0.set(tmp);
             return None;
         }
 
