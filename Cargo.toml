@@ -31,6 +31,7 @@ tokio = { version = "1", features = ["io-util", "rt", "macros", "sync"] }
 openssl-vendored = ["openssl/vendored"]
 default = ["openssl-vendored"]
 backtrace = ["snafu/backtrace"]
+openssl-v111 = ["openssl/v111"]
 
 
 [dev-dependencies]
