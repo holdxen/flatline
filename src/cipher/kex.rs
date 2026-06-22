@@ -1,948 +1,892 @@
-use super::*;
-use crate::{
-    error::{builder, Error, Result},
-    ssh::stream::Stream,
-};
-
-use derive_new::new;
-use indexmap::IndexMap;
+use crate::ssh::{MultiplePrecisionInteger, buffer::Producer};
+use libcrux_ml_kem::{MlKemCiphertext, MlKemKeyPair};
 use openssl::{
-    bn::{BigNum, BigNumContext, MsbOption},
+    bn::{BigNum, BigNumContext},
     derive::Deriver,
+    dh::Dh,
     ec::{EcGroup, EcKey, EcPoint, PointConversionForm},
     md::{Md, MdRef},
+    md_ctx::MdCtx,
     nid::Nid,
-    pkey::{Id, PKey},
+    pkey::{Id, PKey, Private},
     pkey_ctx::PkeyCtx,
 };
+use rand::RngExt;
+use snafu::{OptionExt, ResultExt};
 
-use super::hash::{Hash, MdWrapper};
-use crate::ssh::{self, buffer::Buffer};
+use super::Factory;
+use crate::error::{Result, builder};
+use indexmap::IndexMap;
 
-use ssh::common::code::*;
-
-algo_list! (
+algo_list!(
     all,
     new_all,
     new_kex_by_name,
-    dyn KeyExChange + Send,
-    "curve25519-sha256@libssh.org" => Curve25519Algorithm::curve25519_sha256(),
-    "curve25519-sha256" => Curve25519Algorithm::curve25519_sha256(),
-    "ecdh-sha2-nistp256" => EcdhAlgorithm::ecdh_sha2_nistp256(),
-    "ecdh-sha2-nistp384" => EcdhAlgorithm::ecdh_sha2_nistp384(),
-    "ecdh-sha2-nistp521" => EcdhAlgorithm::ecdh_sha2_nistp521(),
-    "diffie-hellman-group14-sha256" => DhAlgorithm::dh_group14_sha256(),
-    "diffie-hellman-group16-sha512" => DhAlgorithm::dh_group16_sha512(),
-    "diffie-hellman-group16-sha256" => DhAlgorithm::dh_group16_sha256(),
-    "diffie-hellman-group14-sha1" => DhAlgorithm::dh_group14_sha1(),
-    "diffie-hellman-group18-sha512" => DhAlgorithm::dh_group18_sha512(),
-    "diffie-hellman-group-exchange-sha256" => DiffieHellmanKeyExchangeX::sha256(),
-    "diffie-hellman-group-exchange-sha1" => DiffieHellmanKeyExchangeX::sha1(),
-    "diffie-hellman-group15-sha512" => DhAlgorithm::dh_group15_sha512(),
-    "diffie-hellman-group17-sha512" => DhAlgorithm::dh_group17_sha512(),
-    "diffie-hellman-group1-sha1" => DhAlgorithm::dh_group1_sha1(),
+    Algorithm,
+    "mlkem768x25519-sha256" => Algorithm::Hybrid(Box::new(MlKem768X25519::new())),
+    "curve25519-sha256@libssh.org" => Algorithm::Curve25519(Box::new(Curve25519Impl::curve25519_sha256_libssh())),
+    "curve25519-sha256" => Algorithm::Curve25519(Box::new(Curve25519Impl::curve25519_sha256())),
+    "ecdh-sha2-nistp256" => Algorithm::EllipticCurve(Box::new(EllipticCurveDiffieHellmanImpl::ecdh_sha2_nistp256())),
+    "ecdh-sha2-nistp384" => Algorithm::EllipticCurve(Box::new(EllipticCurveDiffieHellmanImpl::ecdh_sha2_nistp384())),
+    "ecdh-sha2-nistp521" => Algorithm::EllipticCurve(Box::new(EllipticCurveDiffieHellmanImpl::ecdh_sha2_nistp521())),
+    "diffie-hellman-group14-sha256" => Algorithm::Standard(Box::new(StandardDiffieHellmanImpl::dh_group14_sha256())),
+    "diffie-hellman-group16-sha512" => Algorithm::Standard(Box::new(StandardDiffieHellmanImpl::dh_group16_sha512())),
+    "diffie-hellman-group14-sha1" => Algorithm::Standard(Box::new(StandardDiffieHellmanImpl::dh_group14_sha1())),
+    "diffie-hellman-group18-sha512" => Algorithm::Standard(Box::new(StandardDiffieHellmanImpl::dh_group18_sha512())),
+    "diffie-hellman-group-exchange-sha256" => Algorithm::Exchange(Box::new(ExchangeDiffieHellmanImpl::sha256())),
+    "diffie-hellman-group-exchange-sha1" => Algorithm::Exchange(Box::new(ExchangeDiffieHellmanImpl::sha1())),
+    "diffie-hellman-group1-sha1" => Algorithm::Standard(Box::new(StandardDiffieHellmanImpl::dh_group1_sha1())),
 );
 
-// ─── Core Traits ─────────────────────────────────────────────────────
-
-/// SSH 密钥交换的高层接口。
-///
-/// 大多数用户不需要直接实现此 trait。
-/// 请实现 [`KexAlgorithm`] 并用 [`StandardKexProtocol`] 包装。
-#[async_trait::async_trait]
-pub trait KeyExChange {
-    async fn kex(&mut self, config: Dependency, stream: &mut dyn Stream) -> Result<Summary>;
+pub struct Information<'a> {
+    pub client_version: &'a str,
+    pub server_version: &'a str,
+    pub client_kex_init: &'a [u8],
+    pub server_kex_init: &'a [u8],
+    pub server_host_key: &'a [u8],
+    pub client_public_key: &'a [u8],
+    pub server_public_key: &'a [u8],
+    pub secret_key: &'a [u8],
 }
 
-/// SSH 密钥交换的密码学核心。
-///
-/// 实现者只需关注密钥生成和共享密钥计算，
-/// 无需处理 SSH 消息 I/O 或交换哈希计算。
-///
-/// # 示例
-///
-/// ```ignore
-/// struct MyKex { /* ... */ }
-///
-/// impl KexAlgorithm for MyKex {
-///     fn generate_keypair(&mut self) -> Result<Vec<u8>> { /* ... */ }
-///     fn compute_shared_secret(&mut self, server_pk: &[u8]) -> Result<Vec<u8>> { /* ... */ }
-///     fn create_hash(&self) -> Box<dyn Hash + Send> { /* ... */ }
-///     fn encode_shared_secret_for_hash(&self, s: &[u8]) -> Vec<u8> { s.to_vec() }
-///     fn encode_client_pubkey_for_hash(&self, pk: &[u8]) -> Vec<u8> { pk.to_vec() }
-///     fn encode_server_pubkey_for_hash(&self, pk: &[u8]) -> Vec<u8> { pk.to_vec() }
-/// }
-///
-/// // 注册：
-/// let kex = StandardKexProtocol::new(MyKex::new(), SSH2_MSG_KEX_ECDH_INIT, SSH2_MSG_KEX_ECDH_REPLY);
-/// ```
-pub trait KexAlgorithm: Send {
-    /// 生成客户端临时密钥对，返回公钥字节（用于发送给服务器）。
-    fn generate_keypair(&mut self) -> Result<Vec<u8>>;
-
-    /// 用服务器公钥计算共享密钥。
-    fn compute_shared_secret(&mut self, server_public_key: &[u8]) -> Result<Vec<u8>>;
-
-    /// 创建用于计算交换哈希的 Hash 实例。
-    fn create_hash(&self) -> Box<dyn Hash + Send>;
-
-    /// 将共享密钥编码为交换哈希所需的格式。
-    fn encode_shared_secret_for_hash(&self, secret: &[u8]) -> Vec<u8>;
-
-    /// 将客户端公钥编码为交换哈希所需的格式。
-    fn encode_client_pubkey_for_hash(&self, pubkey: &[u8]) -> Vec<u8>;
-
-    /// 将服务器公钥编码为交换哈希所需的格式。
-    fn encode_server_pubkey_for_hash(&self, pubkey: &[u8]) -> Vec<u8>;
+pub enum Algorithm {
+    Standard(Box<dyn StandardDiffieHellman + Send>),
+    Exchange(Box<dyn ExchangeDiffieHellman + Send>),
+    EllipticCurve(Box<dyn EllipticCurveDiffieHellman + Send>),
+    Curve25519(Box<dyn Curve25519 + Send>),
+    Streamlined(Box<dyn Streamlined + Send>),
+    Hybrid(Box<dyn Hybrid + Send>),
 }
 
-#[derive(new)]
-pub struct Dependency {
-    client_banner: String,
-    client_kexinit: Vec<u8>,
-    server_banner: String,
-    server_kexinit: Vec<u8>,
-    _kex_strict: bool,
-}
-
-#[derive(new)]
-pub struct Summary {
-    pub server_hostkey: Vec<u8>,
-    pub server_dh_value: Vec<u8>,
-    pub server_signature: Vec<u8>,
-    pub client_hash: Vec<u8>,
-    pub session_id: Vec<u8>,
-    pub secret_key: Vec<u8>,
-    pub hash: Box<dyn Hash + Send>,
-}
-
-// ─── StandardKexProtocol ─────────────────────────────────────────────
-
-/// 标准 DH/ECDH/Curve25519 风格的 KEX 协议实现。
-///
-/// 处理完整的 init/reply 消息交换、交换哈希计算和 Summary 构造。
-/// 用户只需实现 [`KexAlgorithm`] trait 即可通过此结构获得 [`KeyExChange`] 实现。
-pub struct StandardKexProtocol<A: KexAlgorithm> {
-    algorithm: A,
-    init_msg_code: u8,
-    reply_msg_code: u8,
-}
-
-impl<A: KexAlgorithm> StandardKexProtocol<A> {
-    pub fn new(algorithm: A, init_msg_code: u8, reply_msg_code: u8) -> Self {
-        Self {
-            algorithm,
-            init_msg_code,
-            reply_msg_code,
-        }
-    }
-}
-
-#[async_trait::async_trait]
-impl<A: KexAlgorithm> KeyExChange for StandardKexProtocol<A> {
-    async fn kex(&mut self, config: Dependency, stream: &mut dyn Stream) -> Result<Summary> {
-        let client_pubkey = self.algorithm.generate_keypair()?;
-
-        let mut buffer = Buffer::new();
-        buffer.put_u8(self.init_msg_code);
-        buffer.put_one(&client_pubkey);
-        stream.send_payload(buffer.as_ref()).await?;
-
-        let packet = stream.recv_packet().await?;
-        let mut payload = Buffer::from_vec(packet.payload);
-
-        let code = payload
-            .take_u8()
-            .ok_or(Error::invalid_format("unable to parse msg code"))?;
-        if code != self.reply_msg_code {
-            return builder::Protocol {
-                tip: "Failed to receive kex reply",
-            }
-            .fail();
-        }
-
-        let (_, hostkey) = payload
-            .take_one()
-            .ok_or(Error::invalid_format("unable to parse hostkey"))?;
-        let (_, server_pubkey) = payload
-            .take_one()
-            .ok_or(Error::invalid_format("unable to parse server public key"))?;
-        let (_, signature) = payload
-            .take_one()
-            .ok_or(Error::invalid_format("unable to parse signature"))?;
-
-        let shared_secret = self.algorithm.compute_shared_secret(&server_pubkey)?;
-
-        let exchange_hash = compute_standard_exchange_hash(
-            &mut self.algorithm,
-            &config,
-            &hostkey,
-            &client_pubkey,
-            &server_pubkey,
-            &shared_secret,
-        )?;
-
-        let hash = self.algorithm.create_hash();
-        Ok(Summary::new(
-            hostkey.to_vec(),
-            server_pubkey.to_vec(),
-            signature.to_vec(),
-            exchange_hash.clone(),
-            exchange_hash,
-            shared_secret,
-            hash,
-        ))
-    }
-}
-
-fn compute_standard_exchange_hash<A: KexAlgorithm>(
-    algo: &A,
-    deps: &Dependency,
-    hostkey: &[u8],
-    client_pubkey: &[u8],
-    server_pubkey: &[u8],
-    shared_secret: &[u8],
-) -> Result<Vec<u8>> {
-    let mut hash = algo.create_hash();
-    let mut update_one = |data: &[u8]| -> Result<()> {
-        hash.update(&(data.len() as u32).to_be_bytes())?;
-        hash.update(data)?;
-        Ok(())
-    };
-
-    let client_banner = deps.client_banner.trim_end_matches("\r\n").as_bytes();
-    let server_banner = deps.server_banner.trim_end_matches("\r\n").as_bytes();
-
-    update_one(client_banner)?;
-    update_one(server_banner)?;
-    update_one(&deps.client_kexinit)?;
-    update_one(&deps.server_kexinit)?;
-    update_one(hostkey)?;
-
-    let encoded_client_pk = algo.encode_client_pubkey_for_hash(client_pubkey);
-    let encoded_server_pk = algo.encode_server_pubkey_for_hash(server_pubkey);
-    let encoded_secret = algo.encode_shared_secret_for_hash(shared_secret);
-
-    update_one(&encoded_client_pk)?;
-    update_one(&encoded_server_pk)?;
-    update_one(&encoded_secret)?;
-
-    hash.finalize()
-}
-
-/// 将字节编码为 SSH mpint 格式（用于 DH 系列）。
-fn encode_as_mpint(data: &[u8]) -> Vec<u8> {
-    let bn = BigNum::from_slice(data).unwrap();
-    let mut bytes = bn.to_vec();
-    if bn.num_bits() % 8 == 0 {
-        bytes.insert(0, 0);
-    }
-    bytes
-}
-
-// ─── DiffieHellman (核心数学运算) ────────────────────────────────────
-
-#[derive(new)]
-struct DiffieHellman {
-    p: BigNum,
-    g: BigNum,
-    group_order: i32,
-}
-
-impl DiffieHellman {
-    fn make_pri_key(&self) -> Result<BigNum> {
-        let mut key = BigNum::new()?;
-        key.rand(self.group_order * 8 - 1, MsbOption::TWO_ONES, true)?;
-        Ok(key)
-    }
-
-    fn make_pub_key(&self, pri_key: &BigNum) -> Result<(BigNum, BigNumContext)> {
-        let mut key = BigNum::new()?;
-        let mut ctx = BigNumContext::new()?;
-        key.mod_exp(&self.g, pri_key, &self.p, &mut ctx)?;
-        Ok((key, ctx))
-    }
-
-    fn secret_key(
+pub trait KeyExchange {
+    fn name(&self) -> &str;
+    fn generate_key(&mut self) -> Result<Vec<u8>>;
+    fn compute_secret_key(&mut self, server_public_key: &[u8]) -> Result<Vec<u8>>;
+    fn compute_hash(&mut self, info: Information<'_>) -> Result<Vec<u8>>;
+    fn compute_communicate_key(
         &self,
-        pri_key: &BigNum,
-        remote_pub_key: &BigNum,
-        ctx: &mut BigNumContext,
-    ) -> Result<BigNum> {
-        let mut key = BigNum::new()?;
-        key.mod_exp(remote_pub_key, pri_key, &self.p, ctx)?;
-        Ok(key)
-    }
+        secret_key: &[u8],
+        session_id: &[u8],
+        hash: &[u8],
+        version: u8,
+        len: usize,
+    ) -> Result<Vec<u8>>;
 }
 
-// ─── DH Group Constants ──────────────────────────────────────────────
-
-const P_GROUP1_VALUE: [u8; 128] = [
-    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xC9, 0x0F, 0xDA, 0xA2, 0x21, 0x68, 0xC2, 0x34,
-    0xC4, 0xC6, 0x62, 0x8B, 0x80, 0xDC, 0x1C, 0xD1, 0x29, 0x02, 0x4E, 0x08, 0x8A, 0x67, 0xCC, 0x74,
-    0x02, 0x0B, 0xBE, 0xA6, 0x3B, 0x13, 0x9B, 0x22, 0x51, 0x4A, 0x08, 0x79, 0x8E, 0x34, 0x04, 0xDD,
-    0xEF, 0x95, 0x19, 0xB3, 0xCD, 0x3A, 0x43, 0x1B, 0x30, 0x2B, 0x0A, 0x6D, 0xF2, 0x5F, 0x14, 0x37,
-    0x4F, 0xE1, 0x35, 0x6D, 0x6D, 0x51, 0xC2, 0x45, 0xE4, 0x85, 0xB5, 0x76, 0x62, 0x5E, 0x7E, 0xC6,
-    0xF4, 0x4C, 0x42, 0xE9, 0xA6, 0x37, 0xED, 0x6B, 0x0B, 0xFF, 0x5C, 0xB6, 0xF4, 0x06, 0xB7, 0xED,
-    0xEE, 0x38, 0x6B, 0xFB, 0x5A, 0x89, 0x9F, 0xA5, 0xAE, 0x9F, 0x24, 0x11, 0x7C, 0x4B, 0x1F, 0xE6,
-    0x49, 0x28, 0x66, 0x51, 0xEC, 0xE6, 0x53, 0x81, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
-];
-
-const P_GROUP14_VALUE: [u8; 256] = [
-    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xC9, 0x0F, 0xDA, 0xA2, 0x21, 0x68, 0xC2, 0x34,
-    0xC4, 0xC6, 0x62, 0x8B, 0x80, 0xDC, 0x1C, 0xD1, 0x29, 0x02, 0x4E, 0x08, 0x8A, 0x67, 0xCC, 0x74,
-    0x02, 0x0B, 0xBE, 0xA6, 0x3B, 0x13, 0x9B, 0x22, 0x51, 0x4A, 0x08, 0x79, 0x8E, 0x34, 0x04, 0xDD,
-    0xEF, 0x95, 0x19, 0xB3, 0xCD, 0x3A, 0x43, 0x1B, 0x30, 0x2B, 0x0A, 0x6D, 0xF2, 0x5F, 0x14, 0x37,
-    0x4F, 0xE1, 0x35, 0x6D, 0x6D, 0x51, 0xC2, 0x45, 0xE4, 0x85, 0xB5, 0x76, 0x62, 0x5E, 0x7E, 0xC6,
-    0xF4, 0x4C, 0x42, 0xE9, 0xA6, 0x37, 0xED, 0x6B, 0x0B, 0xFF, 0x5C, 0xB6, 0xF4, 0x06, 0xB7, 0xED,
-    0xEE, 0x38, 0x6B, 0xFB, 0x5A, 0x89, 0x9F, 0xA5, 0xAE, 0x9F, 0x24, 0x11, 0x7C, 0x4B, 0x1F, 0xE6,
-    0x49, 0x28, 0x66, 0x51, 0xEC, 0xE4, 0x5B, 0x3D, 0xC2, 0x00, 0x7C, 0xB8, 0xA1, 0x63, 0xBF, 0x05,
-    0x98, 0xDA, 0x48, 0x36, 0x1C, 0x55, 0xD3, 0x9A, 0x69, 0x16, 0x3F, 0xA8, 0xFD, 0x24, 0xCF, 0x5F,
-    0x83, 0x65, 0x5D, 0x23, 0xDC, 0xA3, 0xAD, 0x96, 0x1C, 0x62, 0xF3, 0x56, 0x20, 0x85, 0x52, 0xBB,
-    0x9E, 0xD5, 0x29, 0x07, 0x70, 0x96, 0x96, 0x6D, 0x67, 0x0C, 0x35, 0x4E, 0x4A, 0xBC, 0x98, 0x04,
-    0xF1, 0x74, 0x6C, 0x08, 0xCA, 0x18, 0x21, 0x7C, 0x32, 0x90, 0x5E, 0x46, 0x2E, 0x36, 0xCE, 0x3B,
-    0xE3, 0x9E, 0x77, 0x2C, 0x18, 0x0E, 0x86, 0x03, 0x9B, 0x27, 0x83, 0xA2, 0xEC, 0x07, 0xA2, 0x8F,
-    0xB5, 0xC5, 0x5D, 0xF0, 0x6F, 0x4C, 0x52, 0xC9, 0xDE, 0x2B, 0xCB, 0xF6, 0x95, 0x58, 0x17, 0x18,
-    0x39, 0x95, 0x49, 0x7C, 0xEA, 0x95, 0x6A, 0xE5, 0x15, 0xD2, 0x26, 0x18, 0x98, 0xFA, 0x05, 0x10,
-    0x15, 0x72, 0x8E, 0x5A, 0x8A, 0xAC, 0xAA, 0x68, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
-];
-
-const P_GROUP15_VALUE: [u8; 384] = [
-    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xC9, 0x0F, 0xDA, 0xA2, 0x21, 0x68, 0xC2, 0x34,
-    0xC4, 0xC6, 0x62, 0x8B, 0x80, 0xDC, 0x1C, 0xD1, 0x29, 0x02, 0x4E, 0x08, 0x8A, 0x67, 0xCC, 0x74,
-    0x02, 0x0B, 0xBE, 0xA6, 0x3B, 0x13, 0x9B, 0x22, 0x51, 0x4A, 0x08, 0x79, 0x8E, 0x34, 0x04, 0xDD,
-    0xEF, 0x95, 0x19, 0xB3, 0xCD, 0x3A, 0x43, 0x1B, 0x30, 0x2B, 0x0A, 0x6D, 0xF2, 0x5F, 0x14, 0x37,
-    0x4F, 0xE1, 0x35, 0x6D, 0x6D, 0x51, 0xC2, 0x45, 0xE4, 0x85, 0xB5, 0x76, 0x62, 0x5E, 0x7E, 0xC6,
-    0xF4, 0x4C, 0x42, 0xE9, 0xA6, 0x37, 0xED, 0x6B, 0x0B, 0xFF, 0x5C, 0xB6, 0xF4, 0x06, 0xB7, 0xED,
-    0xEE, 0x38, 0x6B, 0xFB, 0x5A, 0x89, 0x9F, 0xA5, 0xAE, 0x9F, 0x24, 0x11, 0x7C, 0x4B, 0x1F, 0xE6,
-    0x49, 0x28, 0x66, 0x51, 0xEC, 0xE4, 0x5B, 0x3D, 0xC2, 0x00, 0x7C, 0xB8, 0xA1, 0x63, 0xBF, 0x05,
-    0x98, 0xDA, 0x48, 0x36, 0x1C, 0x55, 0xD3, 0x9A, 0x69, 0x16, 0x3F, 0xA8, 0xFD, 0x24, 0xCF, 0x5F,
-    0x83, 0x65, 0x5D, 0x23, 0xDC, 0xA3, 0xAD, 0x96, 0x1C, 0x62, 0xF3, 0x56, 0x20, 0x85, 0x52, 0xBB,
-    0x9E, 0xD5, 0x29, 0x07, 0x70, 0x96, 0x96, 0x6D, 0x67, 0x0C, 0x35, 0x4E, 0x4A, 0xBC, 0x98, 0x04,
-    0xF1, 0x74, 0x6C, 0x08, 0xCA, 0x18, 0x21, 0x7C, 0x32, 0x90, 0x5E, 0x46, 0x2E, 0x36, 0xCE, 0x3B,
-    0xE3, 0x9E, 0x77, 0x2C, 0x18, 0x0E, 0x86, 0x03, 0x9B, 0x27, 0x83, 0xA2, 0xEC, 0x07, 0xA2, 0x8F,
-    0xB5, 0xC5, 0x5D, 0xF0, 0x6F, 0x4C, 0x52, 0xC9, 0xDE, 0x2B, 0xCB, 0xF6, 0x95, 0x58, 0x17, 0x18,
-    0x39, 0x95, 0x49, 0x7C, 0xEA, 0x95, 0x6A, 0xE5, 0x15, 0xD2, 0x26, 0x18, 0x98, 0xFA, 0x05, 0x10,
-    0x15, 0x72, 0x8E, 0x5A, 0x8A, 0xAA, 0xC4, 0x2D, 0xAD, 0x33, 0x17, 0x0D, 0x04, 0x50, 0x7A, 0x33,
-    0xA8, 0x55, 0x21, 0xAB, 0xDF, 0x1C, 0xBA, 0x64, 0xEC, 0xFB, 0x85, 0x04, 0x58, 0xDB, 0xEF, 0x0A,
-    0x8A, 0xEA, 0x71, 0x57, 0x5D, 0x06, 0x0C, 0x7D, 0xB3, 0x97, 0x0F, 0x85, 0xA6, 0xE1, 0xE4, 0xC7,
-    0xAB, 0xF5, 0xAE, 0x8C, 0xDB, 0x09, 0x33, 0xD7, 0x1E, 0x8C, 0x94, 0xE0, 0x4A, 0x25, 0x61, 0x9D,
-    0xCE, 0xE3, 0xD2, 0x26, 0x1A, 0xD2, 0xEE, 0x6B, 0xF1, 0x2F, 0xFA, 0x06, 0xD9, 0x8A, 0x08, 0x64,
-    0xD8, 0x76, 0x02, 0x73, 0x3E, 0xC8, 0x6A, 0x64, 0x52, 0x1F, 0x2B, 0x18, 0x17, 0x7B, 0x20, 0x0C,
-    0xBB, 0xE1, 0x17, 0x57, 0x7A, 0x61, 0x5D, 0x6C, 0x77, 0x09, 0x88, 0xC0, 0xBA, 0xD9, 0x46, 0xE2,
-    0x08, 0xE2, 0x4F, 0xA0, 0x74, 0xE5, 0xAB, 0x31, 0x43, 0xDB, 0x5B, 0xFC, 0xE0, 0xFD, 0x10, 0x8E,
-    0x4B, 0x82, 0xD1, 0x20, 0xA9, 0x3A, 0xD2, 0xCA, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
-];
-
-const P_GROUP16_VALUE: [u8; 512] = [
-    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xC9, 0x0F, 0xDA, 0xA2, 0x21, 0x68, 0xC2, 0x34,
-    0xC4, 0xC6, 0x62, 0x8B, 0x80, 0xDC, 0x1C, 0xD1, 0x29, 0x02, 0x4E, 0x08, 0x8A, 0x67, 0xCC, 0x74,
-    0x02, 0x0B, 0xBE, 0xA6, 0x3B, 0x13, 0x9B, 0x22, 0x51, 0x4A, 0x08, 0x79, 0x8E, 0x34, 0x04, 0xDD,
-    0xEF, 0x95, 0x19, 0xB3, 0xCD, 0x3A, 0x43, 0x1B, 0x30, 0x2B, 0x0A, 0x6D, 0xF2, 0x5F, 0x14, 0x37,
-    0x4F, 0xE1, 0x35, 0x6D, 0x6D, 0x51, 0xC2, 0x45, 0xE4, 0x85, 0xB5, 0x76, 0x62, 0x5E, 0x7E, 0xC6,
-    0xF4, 0x4C, 0x42, 0xE9, 0xA6, 0x37, 0xED, 0x6B, 0x0B, 0xFF, 0x5C, 0xB6, 0xF4, 0x06, 0xB7, 0xED,
-    0xEE, 0x38, 0x6B, 0xFB, 0x5A, 0x89, 0x9F, 0xA5, 0xAE, 0x9F, 0x24, 0x11, 0x7C, 0x4B, 0x1F, 0xE6,
-    0x49, 0x28, 0x66, 0x51, 0xEC, 0xE4, 0x5B, 0x3D, 0xC2, 0x00, 0x7C, 0xB8, 0xA1, 0x63, 0xBF, 0x05,
-    0x98, 0xDA, 0x48, 0x36, 0x1C, 0x55, 0xD3, 0x9A, 0x69, 0x16, 0x3F, 0xA8, 0xFD, 0x24, 0xCF, 0x5F,
-    0x83, 0x65, 0x5D, 0x23, 0xDC, 0xA3, 0xAD, 0x96, 0x1C, 0x62, 0xF3, 0x56, 0x20, 0x85, 0x52, 0xBB,
-    0x9E, 0xD5, 0x29, 0x07, 0x70, 0x96, 0x96, 0x6D, 0x67, 0x0C, 0x35, 0x4E, 0x4A, 0xBC, 0x98, 0x04,
-    0xF1, 0x74, 0x6C, 0x08, 0xCA, 0x18, 0x21, 0x7C, 0x32, 0x90, 0x5E, 0x46, 0x2E, 0x36, 0xCE, 0x3B,
-    0xE3, 0x9E, 0x77, 0x2C, 0x18, 0x0E, 0x86, 0x03, 0x9B, 0x27, 0x83, 0xA2, 0xEC, 0x07, 0xA2, 0x8F,
-    0xB5, 0xC5, 0x5D, 0xF0, 0x6F, 0x4C, 0x52, 0xC9, 0xDE, 0x2B, 0xCB, 0xF6, 0x95, 0x58, 0x17, 0x18,
-    0x39, 0x95, 0x49, 0x7C, 0xEA, 0x95, 0x6A, 0xE5, 0x15, 0xD2, 0x26, 0x18, 0x98, 0xFA, 0x05, 0x10,
-    0x15, 0x72, 0x8E, 0x5A, 0x8A, 0xAA, 0xC4, 0x2D, 0xAD, 0x33, 0x17, 0x0D, 0x04, 0x50, 0x7A, 0x33,
-    0xA8, 0x55, 0x21, 0xAB, 0xDF, 0x1C, 0xBA, 0x64, 0xEC, 0xFB, 0x85, 0x04, 0x58, 0xDB, 0xEF, 0x0A,
-    0x8A, 0xEA, 0x71, 0x57, 0x5D, 0x06, 0x0C, 0x7D, 0xB3, 0x97, 0x0F, 0x85, 0xA6, 0xE1, 0xE4, 0xC7,
-    0xAB, 0xF5, 0xAE, 0x8C, 0xDB, 0x09, 0x33, 0xD7, 0x1E, 0x8C, 0x94, 0xE0, 0x4A, 0x25, 0x61, 0x9D,
-    0xCE, 0xE3, 0xD2, 0x26, 0x1A, 0xD2, 0xEE, 0x6B, 0xF1, 0x2F, 0xFA, 0x06, 0xD9, 0x8A, 0x08, 0x64,
-    0xD8, 0x76, 0x02, 0x73, 0x3E, 0xC8, 0x6A, 0x64, 0x52, 0x1F, 0x2B, 0x18, 0x17, 0x7B, 0x20, 0x0C,
-    0xBB, 0xE1, 0x17, 0x57, 0x7A, 0x61, 0x5D, 0x6C, 0x77, 0x09, 0x88, 0xC0, 0xBA, 0xD9, 0x46, 0xE2,
-    0x08, 0xE2, 0x4F, 0xA0, 0x74, 0xE5, 0xAB, 0x31, 0x43, 0xDB, 0x5B, 0xFC, 0xE0, 0xFD, 0x10, 0x8E,
-    0x4B, 0x82, 0xD1, 0x20, 0xA9, 0x21, 0x08, 0x01, 0x1A, 0x72, 0x3C, 0x12, 0xA7, 0x87, 0xE6, 0xD7,
-    0x88, 0x71, 0x9A, 0x10, 0xBD, 0xBA, 0x5B, 0x26, 0x99, 0xC3, 0x27, 0x18, 0x6A, 0xF4, 0xE2, 0x3C,
-    0x1A, 0x94, 0x68, 0x34, 0xB6, 0x15, 0x0B, 0xDA, 0x25, 0x83, 0xE9, 0xCA, 0x2A, 0xD4, 0x4C, 0xE8,
-    0xDB, 0xBB, 0xC2, 0xDB, 0x04, 0xDE, 0x8E, 0xF9, 0x2E, 0x8E, 0xFC, 0x14, 0x1F, 0xBE, 0xCA, 0xA6,
-    0x28, 0x7C, 0x59, 0x47, 0x4E, 0x6B, 0xC0, 0x5D, 0x99, 0xB2, 0x96, 0x4F, 0xA0, 0x90, 0xC3, 0xA2,
-    0x23, 0x3B, 0xA1, 0x86, 0x51, 0x5B, 0xE7, 0xED, 0x1F, 0x61, 0x29, 0x70, 0xCE, 0xE2, 0xD7, 0xAF,
-    0xB8, 0x1B, 0xDD, 0x76, 0x21, 0x70, 0x48, 0x1C, 0xD0, 0x06, 0x91, 0x27, 0xD5, 0xB0, 0x5A, 0xA9,
-    0x93, 0xB4, 0xEA, 0x98, 0x8D, 0x8F, 0xDD, 0xC1, 0x86, 0xFF, 0xB7, 0xDC, 0x90, 0xA6, 0xC0, 0x8F,
-    0x4D, 0xF4, 0x35, 0xC9, 0x34, 0x06, 0x31, 0x99, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
-];
-
-const P_GROUP17_VALUE: [u8; 768] = [
-    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xC9, 0x0F, 0xDA, 0xA2, 0x21, 0x68, 0xC2, 0x34,
-    0xC4, 0xC6, 0x62, 0x8B, 0x80, 0xDC, 0x1C, 0xD1, 0x29, 0x02, 0x4E, 0x08, 0x8A, 0x67, 0xCC, 0x74,
-    0x02, 0x0B, 0xBE, 0xA6, 0x3B, 0x13, 0x9B, 0x22, 0x51, 0x4A, 0x08, 0x79, 0x8E, 0x34, 0x04, 0xDD,
-    0xEF, 0x95, 0x19, 0xB3, 0xCD, 0x3A, 0x43, 0x1B, 0x30, 0x2B, 0x0A, 0x6D, 0xF2, 0x5F, 0x14, 0x37,
-    0x4F, 0xE1, 0x35, 0x6D, 0x6D, 0x51, 0xC2, 0x45, 0xE4, 0x85, 0xB5, 0x76, 0x62, 0x5E, 0x7E, 0xC6,
-    0xF4, 0x4C, 0x42, 0xE9, 0xA6, 0x37, 0xED, 0x6B, 0x0B, 0xFF, 0x5C, 0xB6, 0xF4, 0x06, 0xB7, 0xED,
-    0xEE, 0x38, 0x6B, 0xFB, 0x5A, 0x89, 0x9F, 0xA5, 0xAE, 0x9F, 0x24, 0x11, 0x7C, 0x4B, 0x1F, 0xE6,
-    0x49, 0x28, 0x66, 0x51, 0xEC, 0xE4, 0x5B, 0x3D, 0xC2, 0x00, 0x7C, 0xB8, 0xA1, 0x63, 0xBF, 0x05,
-    0x98, 0xDA, 0x48, 0x36, 0x1C, 0x55, 0xD3, 0x9A, 0x69, 0x16, 0x3F, 0xA8, 0xFD, 0x24, 0xCF, 0x5F,
-    0x83, 0x65, 0x5D, 0x23, 0xDC, 0xA3, 0xAD, 0x96, 0x1C, 0x62, 0xF3, 0x56, 0x20, 0x85, 0x52, 0xBB,
-    0x9E, 0xD5, 0x29, 0x07, 0x70, 0x96, 0x96, 0x6D, 0x67, 0x0C, 0x35, 0x4E, 0x4A, 0xBC, 0x98, 0x04,
-    0xF1, 0x74, 0x6C, 0x08, 0xCA, 0x18, 0x21, 0x7C, 0x32, 0x90, 0x5E, 0x46, 0x2E, 0x36, 0xCE, 0x3B,
-    0xE3, 0x9E, 0x77, 0x2C, 0x18, 0x0E, 0x86, 0x03, 0x9B, 0x27, 0x83, 0xA2, 0xEC, 0x07, 0xA2, 0x8F,
-    0xB5, 0xC5, 0x5D, 0xF0, 0x6F, 0x4C, 0x52, 0xC9, 0xDE, 0x2B, 0xCB, 0xF6, 0x95, 0x58, 0x17, 0x18,
-    0x39, 0x95, 0x49, 0x7C, 0xEA, 0x95, 0x6A, 0xE5, 0x15, 0xD2, 0x26, 0x18, 0x98, 0xFA, 0x05, 0x10,
-    0x15, 0x72, 0x8E, 0x5A, 0x8A, 0xAA, 0xC4, 0x2D, 0xAD, 0x33, 0x17, 0x0D, 0x04, 0x50, 0x7A, 0x33,
-    0xA8, 0x55, 0x21, 0xAB, 0xDF, 0x1C, 0xBA, 0x64, 0xEC, 0xFB, 0x85, 0x04, 0x58, 0xDB, 0xEF, 0x0A,
-    0x8A, 0xEA, 0x71, 0x57, 0x5D, 0x06, 0x0C, 0x7D, 0xB3, 0x97, 0x0F, 0x85, 0xA6, 0xE1, 0xE4, 0xC7,
-    0xAB, 0xF5, 0xAE, 0x8C, 0xDB, 0x09, 0x33, 0xD7, 0x1E, 0x8C, 0x94, 0xE0, 0x4A, 0x25, 0x61, 0x9D,
-    0xCE, 0xE3, 0xD2, 0x26, 0x1A, 0xD2, 0xEE, 0x6B, 0xF1, 0x2F, 0xFA, 0x06, 0xD9, 0x8A, 0x08, 0x64,
-    0xD8, 0x76, 0x02, 0x73, 0x3E, 0xC8, 0x6A, 0x64, 0x52, 0x1F, 0x2B, 0x18, 0x17, 0x7B, 0x20, 0x0C,
-    0xBB, 0xE1, 0x17, 0x57, 0x7A, 0x61, 0x5D, 0x6C, 0x77, 0x09, 0x88, 0xC0, 0xBA, 0xD9, 0x46, 0xE2,
-    0x08, 0xE2, 0x4F, 0xA0, 0x74, 0xE5, 0xAB, 0x31, 0x43, 0xDB, 0x5B, 0xFC, 0xE0, 0xFD, 0x10, 0x8E,
-    0x4B, 0x82, 0xD1, 0x20, 0xA9, 0x21, 0x08, 0x01, 0x1A, 0x72, 0x3C, 0x12, 0xA7, 0x87, 0xE6, 0xD7,
-    0x88, 0x71, 0x9A, 0x10, 0xBD, 0xBA, 0x5B, 0x26, 0x99, 0xC3, 0x27, 0x18, 0x6A, 0xF4, 0xE2, 0x3C,
-    0x1A, 0x94, 0x68, 0x34, 0xB6, 0x15, 0x0B, 0xDA, 0x25, 0x83, 0xE9, 0xCA, 0x2A, 0xD4, 0x4C, 0xE8,
-    0xDB, 0xBB, 0xC2, 0xDB, 0x04, 0xDE, 0x8E, 0xF9, 0x2E, 0x8E, 0xFC, 0x14, 0x1F, 0xBE, 0xCA, 0xA6,
-    0x28, 0x7C, 0x59, 0x47, 0x4E, 0x6B, 0xC0, 0x5D, 0x99, 0xB2, 0x96, 0x4F, 0xA0, 0x90, 0xC3, 0xA2,
-    0x23, 0x3B, 0xA1, 0x86, 0x51, 0x5B, 0xE7, 0xED, 0x1F, 0x61, 0x29, 0x70, 0xCE, 0xE2, 0xD7, 0xAF,
-    0xB8, 0x1B, 0xDD, 0x76, 0x21, 0x70, 0x48, 0x1C, 0xD0, 0x06, 0x91, 0x27, 0xD5, 0xB0, 0x5A, 0xA9,
-    0x93, 0xB4, 0xEA, 0x98, 0x8D, 0x8F, 0xDD, 0xC1, 0x86, 0xFF, 0xB7, 0xDC, 0x90, 0xA6, 0xC0, 0x8F,
-    0x4D, 0xF4, 0x35, 0xC9, 0x34, 0x02, 0x84, 0x92, 0x36, 0xC3, 0xFA, 0xB4, 0xD2, 0x7C, 0x70, 0x26,
-    0xC1, 0xD4, 0xDC, 0xB2, 0x60, 0x26, 0x46, 0xDE, 0xC9, 0x75, 0x1E, 0x76, 0x3D, 0xBA, 0x37, 0xBD,
-    0xF8, 0xFF, 0x94, 0x06, 0xAD, 0x9E, 0x53, 0x0E, 0xE5, 0xDB, 0x38, 0x2F, 0x41, 0x30, 0x01, 0xAE,
-    0xB0, 0x6A, 0x53, 0xED, 0x90, 0x27, 0xD8, 0x31, 0x17, 0x97, 0x27, 0xB0, 0x86, 0x5A, 0x89, 0x18,
-    0xDA, 0x3E, 0xDB, 0xEB, 0xCF, 0x9B, 0x14, 0xED, 0x44, 0xCE, 0x6C, 0xBA, 0xCE, 0xD4, 0xBB, 0x1B,
-    0xDB, 0x7F, 0x14, 0x47, 0xE6, 0xCC, 0x25, 0x4B, 0x33, 0x20, 0x51, 0x51, 0x2B, 0xD7, 0xAF, 0x42,
-    0x6F, 0xB8, 0xF4, 0x01, 0x37, 0x8C, 0xD2, 0xBF, 0x59, 0x83, 0xCA, 0x01, 0xC6, 0x4B, 0x92, 0xEC,
-    0xF0, 0x32, 0xEA, 0x15, 0xD1, 0x72, 0x1D, 0x03, 0xF4, 0x82, 0xD7, 0xCE, 0x6E, 0x74, 0xFE, 0xF6,
-    0xD5, 0x5E, 0x70, 0x2F, 0x46, 0x98, 0x0C, 0x82, 0xB5, 0xA8, 0x40, 0x31, 0x90, 0x0B, 0x1C, 0x9E,
-    0x59, 0xE7, 0xC9, 0x7F, 0xBE, 0xC7, 0xE8, 0xF3, 0x23, 0xA9, 0x7A, 0x7E, 0x36, 0xCC, 0x88, 0xBE,
-    0x0F, 0x1D, 0x45, 0xB7, 0xFF, 0x58, 0x5A, 0xC5, 0x4B, 0xD4, 0x07, 0xB2, 0x2B, 0x41, 0x54, 0xAA,
-    0xCC, 0x8F, 0x6D, 0x7E, 0xBF, 0x48, 0xE1, 0xD8, 0x14, 0xCC, 0x5E, 0xD2, 0x0F, 0x80, 0x37, 0xE0,
-    0xA7, 0x97, 0x15, 0xEE, 0xF2, 0x9B, 0xE3, 0x28, 0x06, 0xA1, 0xD5, 0x8B, 0xB7, 0xC5, 0xDA, 0x76,
-    0xF5, 0x50, 0xAA, 0x3D, 0x8A, 0x1F, 0xBF, 0xF0, 0xEB, 0x19, 0xCC, 0xB1, 0xA3, 0x13, 0xD5, 0x5C,
-    0xDA, 0x56, 0xC9, 0xEC, 0x2E, 0xF2, 0x96, 0x32, 0x38, 0x7F, 0xE8, 0xD7, 0x6E, 0x3C, 0x04, 0x68,
-    0x04, 0x3E, 0x8F, 0x66, 0x3F, 0x48, 0x60, 0xEE, 0x12, 0xBF, 0x2D, 0x5B, 0x0B, 0x74, 0x74, 0xD6,
-    0xE6, 0x94, 0xF9, 0x1E, 0x6D, 0xCC, 0x40, 0x24, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
-];
-
-const P_GROUP18_VALUE: [u8; 1024] = [
-    0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xC9, 0x0F, 0xDA, 0xA2, 0x21, 0x68, 0xC2, 0x34,
-    0xC4, 0xC6, 0x62, 0x8B, 0x80, 0xDC, 0x1C, 0xD1, 0x29, 0x02, 0x4E, 0x08, 0x8A, 0x67, 0xCC, 0x74,
-    0x02, 0x0B, 0xBE, 0xA6, 0x3B, 0x13, 0x9B, 0x22, 0x51, 0x4A, 0x08, 0x79, 0x8E, 0x34, 0x04, 0xDD,
-    0xEF, 0x95, 0x19, 0xB3, 0xCD, 0x3A, 0x43, 0x1B, 0x30, 0x2B, 0x0A, 0x6D, 0xF2, 0x5F, 0x14, 0x37,
-    0x4F, 0xE1, 0x35, 0x6D, 0x6D, 0x51, 0xC2, 0x45, 0xE4, 0x85, 0xB5, 0x76, 0x62, 0x5E, 0x7E, 0xC6,
-    0xF4, 0x4C, 0x42, 0xE9, 0xA6, 0x37, 0xED, 0x6B, 0x0B, 0xFF, 0x5C, 0xB6, 0xF4, 0x06, 0xB7, 0xED,
-    0xEE, 0x38, 0x6B, 0xFB, 0x5A, 0x89, 0x9F, 0xA5, 0xAE, 0x9F, 0x24, 0x11, 0x7C, 0x4B, 0x1F, 0xE6,
-    0x49, 0x28, 0x66, 0x51, 0xEC, 0xE4, 0x5B, 0x3D, 0xC2, 0x00, 0x7C, 0xB8, 0xA1, 0x63, 0xBF, 0x05,
-    0x98, 0xDA, 0x48, 0x36, 0x1C, 0x55, 0xD3, 0x9A, 0x69, 0x16, 0x3F, 0xA8, 0xFD, 0x24, 0xCF, 0x5F,
-    0x83, 0x65, 0x5D, 0x23, 0xDC, 0xA3, 0xAD, 0x96, 0x1C, 0x62, 0xF3, 0x56, 0x20, 0x85, 0x52, 0xBB,
-    0x9E, 0xD5, 0x29, 0x07, 0x70, 0x96, 0x96, 0x6D, 0x67, 0x0C, 0x35, 0x4E, 0x4A, 0xBC, 0x98, 0x04,
-    0xF1, 0x74, 0x6C, 0x08, 0xCA, 0x18, 0x21, 0x7C, 0x32, 0x90, 0x5E, 0x46, 0x2E, 0x36, 0xCE, 0x3B,
-    0xE3, 0x9E, 0x77, 0x2C, 0x18, 0x0E, 0x86, 0x03, 0x9B, 0x27, 0x83, 0xA2, 0xEC, 0x07, 0xA2, 0x8F,
-    0xB5, 0xC5, 0x5D, 0xF0, 0x6F, 0x4C, 0x52, 0xC9, 0xDE, 0x2B, 0xCB, 0xF6, 0x95, 0x58, 0x17, 0x18,
-    0x39, 0x95, 0x49, 0x7C, 0xEA, 0x95, 0x6A, 0xE5, 0x15, 0xD2, 0x26, 0x18, 0x98, 0xFA, 0x05, 0x10,
-    0x15, 0x72, 0x8E, 0x5A, 0x8A, 0xAA, 0xC4, 0x2D, 0xAD, 0x33, 0x17, 0x0D, 0x04, 0x50, 0x7A, 0x33,
-    0xA8, 0x55, 0x21, 0xAB, 0xDF, 0x1C, 0xBA, 0x64, 0xEC, 0xFB, 0x85, 0x04, 0x58, 0xDB, 0xEF, 0x0A,
-    0x8A, 0xEA, 0x71, 0x57, 0x5D, 0x06, 0x0C, 0x7D, 0xB3, 0x97, 0x0F, 0x85, 0xA6, 0xE1, 0xE4, 0xC7,
-    0xAB, 0xF5, 0xAE, 0x8C, 0xDB, 0x09, 0x33, 0xD7, 0x1E, 0x8C, 0x94, 0xE0, 0x4A, 0x25, 0x61, 0x9D,
-    0xCE, 0xE3, 0xD2, 0x26, 0x1A, 0xD2, 0xEE, 0x6B, 0xF1, 0x2F, 0xFA, 0x06, 0xD9, 0x8A, 0x08, 0x64,
-    0xD8, 0x76, 0x02, 0x73, 0x3E, 0xC8, 0x6A, 0x64, 0x52, 0x1F, 0x2B, 0x18, 0x17, 0x7B, 0x20, 0x0C,
-    0xBB, 0xE1, 0x17, 0x57, 0x7A, 0x61, 0x5D, 0x6C, 0x77, 0x09, 0x88, 0xC0, 0xBA, 0xD9, 0x46, 0xE2,
-    0x08, 0xE2, 0x4F, 0xA0, 0x74, 0xE5, 0xAB, 0x31, 0x43, 0xDB, 0x5B, 0xFC, 0xE0, 0xFD, 0x10, 0x8E,
-    0x4B, 0x82, 0xD1, 0x20, 0xA9, 0x21, 0x08, 0x01, 0x1A, 0x72, 0x3C, 0x12, 0xA7, 0x87, 0xE6, 0xD7,
-    0x88, 0x71, 0x9A, 0x10, 0xBD, 0xBA, 0x5B, 0x26, 0x99, 0xC3, 0x27, 0x18, 0x6A, 0xF4, 0xE2, 0x3C,
-    0x1A, 0x94, 0x68, 0x34, 0xB6, 0x15, 0x0B, 0xDA, 0x25, 0x83, 0xE9, 0xCA, 0x2A, 0xD4, 0x4C, 0xE8,
-    0xDB, 0xBB, 0xC2, 0xDB, 0x04, 0xDE, 0x8E, 0xF9, 0x2E, 0x8E, 0xFC, 0x14, 0x1F, 0xBE, 0xCA, 0xA6,
-    0x28, 0x7C, 0x59, 0x47, 0x4E, 0x6B, 0xC0, 0x5D, 0x99, 0xB2, 0x96, 0x4F, 0xA0, 0x90, 0xC3, 0xA2,
-    0x23, 0x3B, 0xA1, 0x86, 0x51, 0x5B, 0xE7, 0xED, 0x1F, 0x61, 0x29, 0x70, 0xCE, 0xE2, 0xD7, 0xAF,
-    0xB8, 0x1B, 0xDD, 0x76, 0x21, 0x70, 0x48, 0x1C, 0xD0, 0x06, 0x91, 0x27, 0xD5, 0xB0, 0x5A, 0xA9,
-    0x93, 0xB4, 0xEA, 0x98, 0x8D, 0x8F, 0xDD, 0xC1, 0x86, 0xFF, 0xB7, 0xDC, 0x90, 0xA6, 0xC0, 0x8F,
-    0x4D, 0xF4, 0x35, 0xC9, 0x34, 0x02, 0x84, 0x92, 0x36, 0xC3, 0xFA, 0xB4, 0xD2, 0x7C, 0x70, 0x26,
-    0xC1, 0xD4, 0xDC, 0xB2, 0x60, 0x26, 0x46, 0xDE, 0xC9, 0x75, 0x1E, 0x76, 0x3D, 0xBA, 0x37, 0xBD,
-    0xF8, 0xFF, 0x94, 0x06, 0xAD, 0x9E, 0x53, 0x0E, 0xE5, 0xDB, 0x38, 0x2F, 0x41, 0x30, 0x01, 0xAE,
-    0xB0, 0x6A, 0x53, 0xED, 0x90, 0x27, 0xD8, 0x31, 0x17, 0x97, 0x27, 0xB0, 0x86, 0x5A, 0x89, 0x18,
-    0xDA, 0x3E, 0xDB, 0xEB, 0xCF, 0x9B, 0x14, 0xED, 0x44, 0xCE, 0x6C, 0xBA, 0xCE, 0xD4, 0xBB, 0x1B,
-    0xDB, 0x7F, 0x14, 0x47, 0xE6, 0xCC, 0x25, 0x4B, 0x33, 0x20, 0x51, 0x51, 0x2B, 0xD7, 0xAF, 0x42,
-    0x6F, 0xB8, 0xF4, 0x01, 0x37, 0x8C, 0xD2, 0xBF, 0x59, 0x83, 0xCA, 0x01, 0xC6, 0x4B, 0x92, 0xEC,
-    0xF0, 0x32, 0xEA, 0x15, 0xD1, 0x72, 0x1D, 0x03, 0xF4, 0x82, 0xD7, 0xCE, 0x6E, 0x74, 0xFE, 0xF6,
-    0xD5, 0x5E, 0x70, 0x2F, 0x46, 0x98, 0x0C, 0x82, 0xB5, 0xA8, 0x40, 0x31, 0x90, 0x0B, 0x1C, 0x9E,
-    0x59, 0xE7, 0xC9, 0x7F, 0xBE, 0xC7, 0xE8, 0xF3, 0x23, 0xA9, 0x7A, 0x7E, 0x36, 0xCC, 0x88, 0xBE,
-    0x0F, 0x1D, 0x45, 0xB7, 0xFF, 0x58, 0x5A, 0xC5, 0x4B, 0xD4, 0x07, 0xB2, 0x2B, 0x41, 0x54, 0xAA,
-    0xCC, 0x8F, 0x6D, 0x7E, 0xBF, 0x48, 0xE1, 0xD8, 0x14, 0xCC, 0x5E, 0xD2, 0x0F, 0x80, 0x37, 0xE0,
-    0xA7, 0x97, 0x15, 0xEE, 0xF2, 0x9B, 0xE3, 0x28, 0x06, 0xA1, 0xD5, 0x8B, 0xB7, 0xC5, 0xDA, 0x76,
-    0xF5, 0x50, 0xAA, 0x3D, 0x8A, 0x1F, 0xBF, 0xF0, 0xEB, 0x19, 0xCC, 0xB1, 0xA3, 0x13, 0xD5, 0x5C,
-    0xDA, 0x56, 0xC9, 0xEC, 0x2E, 0xF2, 0x96, 0x32, 0x38, 0x7F, 0xE8, 0xD7, 0x6E, 0x3C, 0x04, 0x68,
-    0x04, 0x3E, 0x8F, 0x66, 0x3F, 0x48, 0x60, 0xEE, 0x12, 0xBF, 0x2D, 0x5B, 0x0B, 0x74, 0x74, 0xD6,
-    0xE6, 0x94, 0xF9, 0x1E, 0x6D, 0xBE, 0x11, 0x59, 0x74, 0xA3, 0x92, 0x6F, 0x12, 0xFE, 0xE5, 0xE4,
-    0x38, 0x77, 0x7C, 0xB6, 0xA9, 0x32, 0xDF, 0x8C, 0xD8, 0xBE, 0xC4, 0xD0, 0x73, 0xB9, 0x31, 0xBA,
-    0x3B, 0xC8, 0x32, 0xB6, 0x8D, 0x9D, 0xD3, 0x00, 0x74, 0x1F, 0xA7, 0xBF, 0x8A, 0xFC, 0x47, 0xED,
-    0x25, 0x76, 0xF6, 0x93, 0x6B, 0xA4, 0x24, 0x66, 0x3A, 0xAB, 0x63, 0x9C, 0x5A, 0xE4, 0xF5, 0x68,
-    0x34, 0x23, 0xB4, 0x74, 0x2B, 0xF1, 0xC9, 0x78, 0x23, 0x8F, 0x16, 0xCB, 0xE3, 0x9D, 0x65, 0x2D,
-    0xE3, 0xFD, 0xB8, 0xBE, 0xFC, 0x84, 0x8A, 0xD9, 0x22, 0x22, 0x2E, 0x04, 0xA4, 0x03, 0x7C, 0x07,
-    0x13, 0xEB, 0x57, 0xA8, 0x1A, 0x23, 0xF0, 0xC7, 0x34, 0x73, 0xFC, 0x64, 0x6C, 0xEA, 0x30, 0x6B,
-    0x4B, 0xCB, 0xC8, 0x86, 0x2F, 0x83, 0x85, 0xDD, 0xFA, 0x9D, 0x4B, 0x7F, 0xA2, 0xC0, 0x87, 0xE8,
-    0x79, 0x68, 0x33, 0x03, 0xED, 0x5B, 0xDD, 0x3A, 0x06, 0x2B, 0x3C, 0xF5, 0xB3, 0xA2, 0x78, 0xA6,
-    0x6D, 0x2A, 0x13, 0xF8, 0x3F, 0x44, 0xF8, 0x2D, 0xDF, 0x31, 0x0E, 0xE0, 0x74, 0xAB, 0x6A, 0x36,
-    0x45, 0x97, 0xE8, 0x99, 0xA0, 0x25, 0x5D, 0xC1, 0x64, 0xF3, 0x1C, 0xC5, 0x08, 0x46, 0x85, 0x1D,
-    0xF9, 0xAB, 0x48, 0x19, 0x5D, 0xED, 0x7E, 0xA1, 0xB1, 0xD5, 0x10, 0xBD, 0x7E, 0xE7, 0x4D, 0x73,
-    0xFA, 0xF3, 0x6B, 0xC3, 0x1E, 0xCF, 0xA2, 0x68, 0x35, 0x90, 0x46, 0xF4, 0xEB, 0x87, 0x9F, 0x92,
-    0x40, 0x09, 0x43, 0x8B, 0x48, 0x1C, 0x6C, 0xD7, 0x88, 0x9A, 0x00, 0x2E, 0xD5, 0xEE, 0x38, 0x2B,
-    0xC9, 0x19, 0x0D, 0xA6, 0xFC, 0x02, 0x6E, 0x47, 0x95, 0x58, 0xE4, 0x47, 0x56, 0x77, 0xE9, 0xAA,
-    0x9E, 0x30, 0x50, 0xE2, 0x76, 0x56, 0x94, 0xDF, 0xC8, 0x1F, 0x56, 0xE8, 0x80, 0xB9, 0x6E, 0x71,
-    0x60, 0xC9, 0x80, 0xDD, 0x98, 0xED, 0xD3, 0xDF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
-];
-
-// ─── DhAlgorithm ─────────────────────────────────────────────────────
-
-/// DH 密钥交换算法（实现 [`KexAlgorithm`]）。
-pub struct DhAlgorithm {
-    p: &'static [u8],
-    g: u32,
-    hash: &'static MdRef,
-    // 临时状态：在 generate_keypair 中设置，在 compute_shared_secret 中消费
-    dh: Option<DiffieHellman>,
-    pri_key: Option<BigNum>,
-    ctx: Option<BigNumContext>,
+pub trait StandardDiffieHellman: KeyExchange {}
+pub trait ExchangeDiffieHellman: KeyExchange {
+    fn max(&self) -> u32;
+    fn min(&self) -> u32;
+    fn number_of_bits(&self) -> u32;
+    fn set_recommended_number_of_bits(&mut self, bits: u32);
+    fn initialize(&mut self, p: &[u8], g: &[u8]) -> Result<()>;
 }
 
-impl DhAlgorithm {
-    fn new(p: &'static [u8], g: u32, hash: &'static MdRef) -> Self {
-        Self {
-            p,
-            g,
-            hash,
-            dh: None,
-            pri_key: None,
-            ctx: None,
-        }
-    }
+pub trait EllipticCurveDiffieHellman: KeyExchange {}
+pub trait Curve25519: KeyExchange {}
+pub trait Streamlined: KeyExchange {}
+pub trait Hybrid: KeyExchange {}
 
-    fn dh_group1_sha1() -> StandardKexProtocol<Self> {
-        StandardKexProtocol::new(
-            Self::new(&P_GROUP1_VALUE, 2, Md::sha1()),
-            SSH_MSG_KEXDH_INIT,
-            SSH_MSG_KEXDH_REPLY,
-        )
-    }
-    fn dh_group14_sha1() -> StandardKexProtocol<Self> {
-        StandardKexProtocol::new(
-            Self::new(&P_GROUP14_VALUE, 2, Md::sha1()),
-            SSH_MSG_KEXDH_INIT,
-            SSH_MSG_KEXDH_REPLY,
-        )
-    }
-    fn dh_group14_sha256() -> StandardKexProtocol<Self> {
-        StandardKexProtocol::new(
-            Self::new(&P_GROUP14_VALUE, 2, Md::sha256()),
-            SSH_MSG_KEXDH_INIT,
-            SSH_MSG_KEXDH_REPLY,
-        )
-    }
-    fn dh_group15_sha512() -> StandardKexProtocol<Self> {
-        StandardKexProtocol::new(
-            Self::new(&P_GROUP15_VALUE, 2, Md::sha512()),
-            SSH_MSG_KEXDH_INIT,
-            SSH_MSG_KEXDH_REPLY,
-        )
-    }
-    fn dh_group16_sha512() -> StandardKexProtocol<Self> {
-        StandardKexProtocol::new(
-            Self::new(&P_GROUP16_VALUE, 2, Md::sha512()),
-            SSH_MSG_KEXDH_INIT,
-            SSH_MSG_KEXDH_REPLY,
-        )
-    }
-    fn dh_group16_sha256() -> StandardKexProtocol<Self> {
-        StandardKexProtocol::new(
-            Self::new(&P_GROUP16_VALUE, 2, Md::sha256()),
-            SSH_MSG_KEXDH_INIT,
-            SSH_MSG_KEXDH_REPLY,
-        )
-    }
-    fn dh_group17_sha512() -> StandardKexProtocol<Self> {
-        StandardKexProtocol::new(
-            Self::new(&P_GROUP17_VALUE, 2, Md::sha512()),
-            SSH_MSG_KEXDH_INIT,
-            SSH_MSG_KEXDH_REPLY,
-        )
-    }
-    fn dh_group18_sha512() -> StandardKexProtocol<Self> {
-        StandardKexProtocol::new(
-            Self::new(&P_GROUP18_VALUE, 2, Md::sha512()),
-            SSH_MSG_KEXDH_INIT,
-            SSH_MSG_KEXDH_REPLY,
-        )
-    }
-}
-
-impl KexAlgorithm for DhAlgorithm {
-    fn generate_keypair(&mut self) -> Result<Vec<u8>> {
-        let p = BigNum::from_slice(self.p)?;
-        let g = BigNum::from_u32(self.g)?;
-        let group_order = self.p.len() as i32;
-        let dh = DiffieHellman::new(p, g, group_order);
-
-        let pri_key = dh.make_pri_key()?;
-        let (pub_key, ctx) = dh.make_pub_key(&pri_key)?;
-
-        self.pri_key = Some(pri_key);
-        self.ctx = Some(ctx);
-        self.dh = Some(dh);
-
-        Ok(encode_as_mpint(&pub_key.to_vec()))
-    }
-
-    fn compute_shared_secret(&mut self, server_public_key: &[u8]) -> Result<Vec<u8>> {
-        let dh = self
-            .dh
-            .take()
-            .ok_or(Error::ub("generate_keypair not called"))?;
-        let pri_key = self
-            .pri_key
-            .take()
-            .ok_or(Error::ub("generate_keypair not called"))?;
-        let mut ctx = self
-            .ctx
-            .take()
-            .ok_or(Error::ub("generate_keypair not called"))?;
-
-        let server_bn = BigNum::from_slice(server_public_key)?;
-        let secret = dh.secret_key(&pri_key, &server_bn, &mut ctx)?;
-        Ok(encode_as_mpint(&secret.to_vec()))
-    }
-
-    fn create_hash(&self) -> Box<dyn Hash + Send> {
-        Box::new(MdWrapper::initialize(self.hash).unwrap())
-    }
-
-    fn encode_shared_secret_for_hash(&self, secret: &[u8]) -> Vec<u8> {
-        encode_as_mpint(secret)
-    }
-
-    fn encode_client_pubkey_for_hash(&self, pubkey: &[u8]) -> Vec<u8> {
-        encode_as_mpint(pubkey)
-    }
-
-    fn encode_server_pubkey_for_hash(&self, pubkey: &[u8]) -> Vec<u8> {
-        encode_as_mpint(pubkey)
-    }
-}
-
-// ─── DiffieHellmanKeyExchangeX (GEX) ────────────────────────────────
-
-/// DH Group Exchange（GEX）密钥交换。
-///
-/// 与标准 DH 不同，GEX 需要先向服务器请求 group，因此独立实现 [`KeyExChange`]。
-/// 复用 [`DiffieHellman`] 结构体和 [`encode_as_mpint`] 辅助函数。
-#[derive(new)]
-pub struct DiffieHellmanKeyExchangeX {
-    hash: &'static MdRef,
-    min: u32,
-    prefer: u32,
-    max: u32,
-}
-
-impl DiffieHellmanKeyExchangeX {
-    fn sha256() -> Self {
-        Self::new(Md::sha256(), 2048, 4096, 8192)
-    }
-
-    fn sha1() -> Self {
-        Self::new(Md::sha1(), 2048, 4096, 8192)
-    }
-}
-
-#[async_trait::async_trait]
-impl KeyExChange for DiffieHellmanKeyExchangeX {
-    async fn kex(&mut self, deps: Dependency, stream: &mut dyn Stream) -> Result<Summary> {
-        // 1. 发送 GEX request
-        let mut buffer = Buffer::new();
-        buffer.put_u8(SSH_MSG_KEX_DH_GEX_REQUEST);
-        buffer.put_u32(self.min);
-        buffer.put_u32(self.prefer);
-        buffer.put_u32(self.max);
-        stream.send_payload(buffer.as_ref()).await?;
-
-        // 保存 hash request 数据（不含 msg code）
-        let mut hashreq = Buffer::new();
-        hashreq.put_u32(self.min);
-        hashreq.put_u32(self.prefer);
-        hashreq.put_u32(self.max);
-        let hashreq = hashreq.into_vec();
-
-        // 2. 接收 GEX group
-        let packet = stream.recv_packet().await?;
-        let mut payload = Buffer::from_vec(packet.payload);
-
-        let code = payload
-            .take_u8()
-            .ok_or(Error::invalid_format("unable to parse msg"))?;
-        if code != SSH_MSG_KEX_DH_GEX_GROUP {
-            return builder::Protocol {
-                tip: "Failed to receive dh gex group msg",
-            }
-            .fail();
-        }
-
-        let hashpg = payload.clone().into_vec();
-
-        let (_, mut p_bytes) = payload
-            .take_one()
-            .ok_or(Error::invalid_format("unable to parse p value"))?;
-        let (_, mut g_bytes) = payload
-            .take_one()
-            .ok_or(Error::invalid_format("unable to parse g value"))?;
-
-        // 去除前导零
-        while !p_bytes.is_empty() && p_bytes[0] == 0 {
-            p_bytes.remove(0);
-        }
-        while !g_bytes.is_empty() && g_bytes[0] == 0 {
-            g_bytes.remove(0);
-        }
-
-        let group_order = p_bytes.len() as i32;
-        let p = BigNum::from_slice(&p_bytes)?;
-        let g = BigNum::from_slice(&g_bytes)?;
-
-        // 3. DH 计算
-        let dh = DiffieHellman::new(p, g, group_order);
-        let pri_key = dh.make_pri_key()?;
-        let (pub_key_bn, mut ctx) = dh.make_pub_key(&pri_key)?;
-
-        let pub_key = encode_as_mpint(&pub_key_bn.to_vec());
-
-        // 4. 发送 GEX init
-        let mut buffer = Buffer::new();
-        buffer.put_u8(SSH_MSG_KEX_DH_GEX_INIT);
-        buffer.put_one(&pub_key);
-        stream.send_payload(buffer.as_ref()).await?;
-
-        // 5. 接收 GEX reply
-        let packet = stream.recv_packet().await?;
-        let mut payload = Buffer::from_vec(packet.payload);
-
-        let code = payload.take_u8().unwrap();
-        if code != SSH_MSG_KEX_DH_GEX_REPLY {
-            return builder::Protocol {
-                tip: "Failed to receive dh gex reply",
-            }
-            .fail();
-        }
-
-        let (_, hostkey) = payload
-            .take_one()
-            .ok_or(Error::invalid_format("unable to parse hostkey"))?;
-        let (_, f) = payload
-            .take_one()
-            .ok_or(Error::invalid_format("unable to parse f value"))?;
-        let (_, sign) = payload
-            .take_one()
-            .ok_or(Error::invalid_format("unable to parse signature"))?;
-
-        let bnf = BigNum::from_slice(&f)?;
-        let secret_key_bn = dh.secret_key(&pri_key, &bnf, &mut ctx)?;
-        let secret_key = encode_as_mpint(&secret_key_bn.to_vec());
-
-        // 6. 计算交换哈希（GEX 特有：包含 hashreq 和 hashpg）
-        let mut hash = MdWrapper::initialize(self.hash)?;
-
-        let update_one = |hash: &mut MdWrapper, data: &[u8]| -> Result<()> {
-            let buf = Buffer::from_one(data);
-            hash.update(buf.as_ref())?;
-            Ok(())
-        };
-
-        let client_banner = deps.client_banner.trim_end_matches("\r\n").as_bytes();
-        let server_banner = deps.server_banner.trim_end_matches("\r\n").as_bytes();
-
-        update_one(&mut hash, client_banner)?;
-        update_one(&mut hash, server_banner)?;
-        update_one(&mut hash, &deps.client_kexinit)?;
-        update_one(&mut hash, &deps.server_kexinit)?;
-        update_one(&mut hash, &hostkey)?;
-
-        // GEX 特有：写入 hashreq 和 hashpg（原始字节，无 length prefix）
-        hash.update(&hashreq)?;
-        hash.update(&hashpg)?;
-
-        update_one(&mut hash, &pub_key)?;
-        update_one(&mut hash, &f)?;
-        update_one(&mut hash, &secret_key)?;
-
-        let session_id = hash.finalize()?;
-
-        let hash = MdWrapper::initialize(self.hash)?;
-        Ok(Summary::new(
-            hostkey,
-            f,
-            sign,
-            session_id.clone(),
-            session_id,
-            secret_key,
-            Box::new(hash),
-        ))
-    }
-}
-
-// ─── EcdhAlgorithm ───────────────────────────────────────────────────
-
-/// ECDH 密钥交换算法（实现 [`KexAlgorithm`]）。
-pub struct EcdhAlgorithm {
+pub struct EllipticCurveDiffieHellmanImpl {
+    name: &'static str,
     nid: Nid,
-    hash: &'static MdRef,
+    hasher: &'static MdRef,
     private_key: Option<PKey<openssl::pkey::Private>>,
 }
 
-impl EcdhAlgorithm {
-    fn new(nid: Nid, hash: &'static MdRef) -> Self {
+impl EllipticCurveDiffieHellmanImpl {
+    fn new(name: &'static str, nid: Nid, hasher: &'static MdRef) -> Self {
         Self {
+            name,
             nid,
-            hash,
+            hasher,
             private_key: None,
         }
     }
 
-    fn ecdh_sha2_nistp256() -> StandardKexProtocol<Self> {
-        StandardKexProtocol::new(
-            Self::new(Nid::X9_62_PRIME256V1, Md::sha256()),
-            SSH2_MSG_KEX_ECDH_INIT,
-            SSH2_MSG_KEX_ECDH_REPLY,
-        )
+    fn ecdh_sha2_nistp256() -> Self {
+        Self::new("ecdh-sha2-nistp256", Nid::X9_62_PRIME256V1, Md::sha256())
     }
 
-    fn ecdh_sha2_nistp384() -> StandardKexProtocol<Self> {
-        StandardKexProtocol::new(
-            Self::new(Nid::SECP384R1, Md::sha384()),
-            SSH2_MSG_KEX_ECDH_INIT,
-            SSH2_MSG_KEX_ECDH_REPLY,
-        )
+    fn ecdh_sha2_nistp384() -> Self {
+        Self::new("ecdh-sha2-nistp384", Nid::SECP384R1, Md::sha384())
     }
 
-    fn ecdh_sha2_nistp521() -> StandardKexProtocol<Self> {
-        StandardKexProtocol::new(
-            Self::new(Nid::SECP521R1, Md::sha512()),
-            SSH2_MSG_KEX_ECDH_INIT,
-            SSH2_MSG_KEX_ECDH_REPLY,
-        )
+    fn ecdh_sha2_nistp521() -> Self {
+        Self::new("ecdh-sha2-nistp521", Nid::SECP521R1, Md::sha512())
     }
 }
 
-impl KexAlgorithm for EcdhAlgorithm {
-    fn generate_keypair(&mut self) -> Result<Vec<u8>> {
-        let group = EcGroup::from_curve_name(self.nid)?;
-        let ec_key = EcKey::generate(&group)?;
-        let mut ctx = BigNumContext::new()?;
-        let pubkey =
-            ec_key
-                .public_key()
-                .to_bytes(&group, PointConversionForm::UNCOMPRESSED, &mut ctx)?;
-        self.private_key = Some(ec_key.try_into()?);
+impl EllipticCurveDiffieHellman for EllipticCurveDiffieHellmanImpl {}
+
+impl KeyExchange for EllipticCurveDiffieHellmanImpl {
+    fn name(&self) -> &str {
+        self.name
+    }
+
+    fn generate_key(&mut self) -> Result<Vec<u8>> {
+        let group = EcGroup::from_curve_name(self.nid).context(builder::OpenSSL)?;
+        let ec_key = EcKey::generate(&group).context(builder::OpenSSL)?;
+        let mut ctx = BigNumContext::new().context(builder::OpenSSL)?;
+        let pubkey = ec_key
+            .public_key()
+            .to_bytes(&group, PointConversionForm::UNCOMPRESSED, &mut ctx)
+            .context(builder::OpenSSL)?;
+        self.private_key = Some(ec_key.try_into().context(builder::OpenSSL)?);
         Ok(pubkey)
     }
 
-    fn compute_shared_secret(&mut self, server_public_key: &[u8]) -> Result<Vec<u8>> {
-        let private_key = self
-            .private_key
-            .take()
-            .ok_or(Error::ub("generate_keypair not called"))?;
-        let group = EcGroup::from_curve_name(self.nid)?;
-        let mut ctx = BigNumContext::new()?;
-        let server_point = EcPoint::from_bytes(&group, server_public_key, &mut ctx)?;
-        let server_key = EcKey::from_public_key(&group, &server_point)?;
-        let server_pkey: PKey<_> = server_key.try_into()?;
+    fn compute_secret_key(&mut self, server_public_key: &[u8]) -> Result<Vec<u8>> {
+        let private_key = self.private_key.take().context(builder::InvalidOperation {
+            detail: "Genreate key first",
+        })?;
+        let group = EcGroup::from_curve_name(self.nid).context(builder::OpenSSL)?;
+        let mut ctx = BigNumContext::new().context(builder::OpenSSL)?;
+        let server_point =
+            EcPoint::from_bytes(&group, server_public_key, &mut ctx).context(builder::OpenSSL)?;
+        let server_key = EcKey::from_public_key(&group, &server_point).context(builder::OpenSSL)?;
+        let server_pkey: PKey<_> = server_key.try_into().context(builder::OpenSSL)?;
 
-        let mut deriver = Deriver::new(&private_key)?;
-        deriver.set_peer(&server_pkey)?;
-        Ok(deriver.derive_to_vec()?)
+        let mut deriver = Deriver::new(&private_key).context(builder::OpenSSL)?;
+        deriver.set_peer(&server_pkey).context(builder::OpenSSL)?;
+        Ok(deriver
+            .derive_to_vec()
+            .context(builder::OpenSSL)?
+            .into_integer())
     }
 
-    fn create_hash(&self) -> Box<dyn Hash + Send> {
-        Box::new(MdWrapper::initialize(self.hash).unwrap())
+    fn compute_hash(&mut self, info: Information<'_>) -> Result<Vec<u8>> {
+        let mut producer = Producer::default();
+
+        let client_version = info.client_version;
+        let server_version = info.server_version;
+
+        producer.put_one(client_version);
+        producer.put_one(server_version);
+        producer.put_one(info.client_kex_init);
+        producer.put_one(info.server_kex_init);
+
+        producer.put_one(info.server_host_key);
+        producer.put_one(info.client_public_key);
+        producer.put_one(info.server_public_key);
+
+        producer.put_one(info.secret_key); //  tbd
+
+        let mut ctx = MdCtx::new().context(builder::OpenSSL)?;
+
+        ctx.digest_init(self.hasher).context(builder::OpenSSL)?;
+
+        ctx.digest_update(producer.as_bytes())
+            .context(builder::OpenSSL)?;
+
+        let mut output = vec![0; ctx.size()];
+
+        ctx.digest_final(&mut output).context(builder::OpenSSL)?;
+
+        Ok(output)
     }
 
-    fn encode_shared_secret_for_hash(&self, secret: &[u8]) -> Vec<u8> {
-        encode_as_mpint(secret)
-    }
-
-    fn encode_client_pubkey_for_hash(&self, pubkey: &[u8]) -> Vec<u8> {
-        pubkey.to_vec()
-    }
-
-    fn encode_server_pubkey_for_hash(&self, pubkey: &[u8]) -> Vec<u8> {
-        pubkey.to_vec()
+    fn compute_communicate_key(
+        &self,
+        secret_key: &[u8],
+        session_id: &[u8],
+        hash: &[u8],
+        version: u8,
+        len: usize,
+    ) -> Result<Vec<u8>> {
+        compute_keys(self.hasher, secret_key, session_id, hash, version, len)
     }
 }
 
-// ─── Curve25519Algorithm ─────────────────────────────────────────────
-
-/// Curve25519 密钥交换算法（实现 [`KexAlgorithm`]）。
-pub struct Curve25519Algorithm {
-    hash: &'static MdRef,
-    private_key: Option<PKey<openssl::pkey::Private>>,
+pub struct ExchangeDiffieHellmanImpl {
+    name: &'static str,
+    min: u32,
+    number_of_bits: u32,
+    max: u32,
+    hasher: &'static MdRef,
+    ctx: Option<BigNumContext>,
+    key: Option<Dh<Private>>,
 }
 
-impl Curve25519Algorithm {
-    fn new(hash: &'static MdRef) -> Self {
+impl ExchangeDiffieHellmanImpl {
+    fn new(
+        name: &'static str,
+        min: u32,
+        number_of_bits: u32,
+        max: u32,
+        hasher: &'static MdRef,
+    ) -> Self {
         Self {
-            hash,
-            private_key: None,
+            name,
+            min,
+            number_of_bits,
+            max,
+            hasher,
+            ctx: None,
+            key: None,
         }
     }
 
-    fn curve25519_sha256() -> StandardKexProtocol<Self> {
-        StandardKexProtocol::new(
-            Self::new(Md::sha256()),
-            SSH2_MSG_KEX_ECDH_INIT,
-            SSH2_MSG_KEX_ECDH_REPLY,
+    fn sha1() -> Self {
+        Self::new(
+            "diffie-hellman-group-exchange-sha1",
+            2048,
+            4096,
+            8192,
+            Md::sha1(),
+        )
+    }
+    fn sha256() -> Self {
+        Self::new(
+            "diffie-hellman-group-exchange-sha256",
+            2048,
+            4096,
+            8192,
+            Md::sha256(),
         )
     }
 }
 
-impl KexAlgorithm for Curve25519Algorithm {
-    fn generate_keypair(&mut self) -> Result<Vec<u8>> {
-        let mut ctx = PkeyCtx::new_id(Id::X25519)?;
-        ctx.keygen_init()?;
-        let private = ctx.keygen()?;
-        let public_bytes = private.raw_public_key()?;
-        self.private_key = Some(private);
-        Ok(public_bytes)
+impl ExchangeDiffieHellman for ExchangeDiffieHellmanImpl {
+    fn max(&self) -> u32 {
+        self.max
     }
 
-    fn compute_shared_secret(&mut self, server_public_key: &[u8]) -> Result<Vec<u8>> {
-        let private_key = self
-            .private_key
-            .take()
-            .ok_or(Error::ub("generate_keypair not called"))?;
-        let server_public = PKey::public_key_from_raw_bytes(server_public_key, Id::X25519)?;
-
-        let mut ctx = PkeyCtx::new(&private_key)?;
-        ctx.derive_init()?;
-        ctx.derive_set_peer(&server_public)?;
-        let size = ctx.derive(None)?;
-        let mut secret = vec![0; size];
-        ctx.derive(Some(&mut secret))?;
-        Ok(secret)
+    fn min(&self) -> u32 {
+        self.min
     }
 
-    fn create_hash(&self) -> Box<dyn Hash + Send> {
-        Box::new(MdWrapper::initialize(self.hash).unwrap())
+    fn number_of_bits(&self) -> u32 {
+        self.number_of_bits
     }
 
-    fn encode_shared_secret_for_hash(&self, secret: &[u8]) -> Vec<u8> {
-        encode_as_mpint(secret)
+    fn set_recommended_number_of_bits(&mut self, bits: u32) {
+        if bits >= self.min && bits <= self.max {
+            self.number_of_bits = bits;
+        }
     }
 
-    fn encode_client_pubkey_for_hash(&self, pubkey: &[u8]) -> Vec<u8> {
-        pubkey.to_vec()
+    fn initialize(&mut self, p: &[u8], g: &[u8]) -> Result<()> {
+        let p = BigNum::from_slice(p).context(builder::OpenSSL)?;
+
+        let bits = p.num_bits();
+
+        if bits < self.min as i32 || bits > self.max as i32 {
+            super::InvalidPrimeSnafu.fail()?;
+        }
+
+        let g = BigNum::from_slice(g).context(builder::OpenSSL)?;
+
+        let dh = Dh::from_pqg(p, None, g).context(builder::OpenSSL)?;
+
+        // Unable to call DH_set_length to limit key length
+        // Maybe slower than other ssh clients, but safer
+
+        let key = dh.generate_key().context(builder::OpenSSL)?;
+
+        // let private = key.private_key().to_vec();
+
+        self.key = Some(key);
+        Ok(())
+    }
+}
+impl KeyExchange for ExchangeDiffieHellmanImpl {
+    fn name(&self) -> &str {
+        self.name
+    }
+    fn generate_key(&mut self) -> Result<Vec<u8>> {
+        let key = self.key.as_ref().context(builder::InvalidOperation {
+            detail: "Initialize first",
+        })?;
+
+        Ok(key.public_key().to_integer())
+    }
+    // compute shared secret key from server public key and client_private key that genrated by generate_key
+    fn compute_secret_key(&mut self, server_public_key: &[u8]) -> Result<Vec<u8>> {
+        let key = self.key.as_ref().context(builder::InvalidOperation {
+            detail: "Generate key first",
+        })?;
+
+        let client_private_key = key.private_key();
+
+        let server_public_key = BigNum::from_slice(server_public_key).context(builder::OpenSSL)?;
+
+        let mut secret = BigNum::new().context(builder::OpenSSL)?;
+
+        if self.ctx.is_none() {
+            self.ctx = Some(BigNumContext::new().context(builder::OpenSSL)?);
+        }
+
+        secret
+            .mod_exp(
+                &server_public_key,
+                client_private_key,
+                key.prime_p(),
+                self.ctx.as_mut().unwrap(),
+            )
+            .context(builder::OpenSSL)?;
+
+        Ok(secret.to_integer())
     }
 
-    fn encode_server_pubkey_for_hash(&self, pubkey: &[u8]) -> Vec<u8> {
-        pubkey.to_vec()
+    fn compute_hash(&mut self, info: Information<'_>) -> Result<Vec<u8>> {
+        let mut producer = Producer::default();
+
+        let key = self.key.as_ref().context(builder::InvalidOperation {
+            detail: "Generate key first",
+        })?;
+
+        producer.put_one(info.client_version);
+        producer.put_one(info.server_version);
+        producer.put_one(info.client_kex_init);
+        producer.put_one(info.server_kex_init);
+
+        producer.put_one(info.server_host_key);
+
+        producer.put_u32(self.min);
+        producer.put_u32(self.number_of_bits);
+        producer.put_u32(self.max);
+
+        producer.put_one(key.prime_p().to_integer());
+        producer.put_one(key.generator().to_integer());
+        producer.put_one(info.client_public_key);
+
+        producer.put_one(info.server_public_key);
+
+        producer.put_one(info.secret_key); //  tbd
+
+        let mut ctx = MdCtx::new().context(builder::OpenSSL)?;
+
+        ctx.digest_init(self.hasher).context(builder::OpenSSL)?;
+
+        ctx.digest_update(producer.as_bytes())
+            .context(builder::OpenSSL)?;
+
+        let mut output = vec![0; ctx.size()];
+
+        ctx.digest_final(&mut output).context(builder::OpenSSL)?;
+
+        Ok(output)
+    }
+
+    fn compute_communicate_key(
+        &self,
+        secret_key: &[u8],
+        session_id: &[u8],
+        hash: &[u8],
+        version: u8,
+        len: usize,
+    ) -> Result<Vec<u8>> {
+        compute_keys(self.hasher, secret_key, session_id, hash, version, len)
     }
 }
 
-mod new {
-    use openssl::{bn::{BigNum, BigNumContext, BigNumRef}, dh::Dh, md::MdRef, md_ctx::MdCtx, pkey::Private};
+pub struct StandardDiffieHellmanImpl<'a> {
+    name: &'static str,
+    p: &'a [u8],
+    g: u32,
+    ctx: Option<BigNumContext>,
+    hasher: &'static MdRef,
+    key: Option<Dh<Private>>,
+}
+impl StandardDiffieHellmanImpl<'static> {
+    fn new(name: &'static str, p: &'static [u8], g: u32, hasher: &'static MdRef) -> Self {
+        Self {
+            name,
+            p,
+            g,
+            ctx: None,
+            hasher,
+            key: None,
+        }
+    }
 
-use crate::ssh::buffer::Producer;
+    fn dh_group1_sha1() -> Self {
+        Self::new(
+            "diffie-hellman-group1-sha1",
+            &value::P_GROUP1_VALUE,
+            2,
+            Md::sha1(),
+        )
+    }
+    fn dh_group14_sha1() -> Self {
+        Self::new(
+            "diffie-hellman-group14-sha1",
+            &value::P_GROUP14_VALUE,
+            2,
+            Md::sha1(),
+        )
+    }
+    fn dh_group14_sha256() -> Self {
+        Self::new(
+            "diffie-hellman-group14-sha256",
+            &value::P_GROUP14_VALUE,
+            2,
+            Md::sha256(),
+        )
+    }
+    // fn dh_group15_sha512() -> Self {
+    //     Self::new(
+    //         "diffie-hellman-group15-sha512",
+    //         &value::P_GROUP15_VALUE,
+    //         2,
+    //         Md::sha512(),
+    //     )
+    // }
+    fn dh_group16_sha512() -> Self {
+        Self::new(
+            "diffie-hellman-group16-sha512",
+            &value::P_GROUP16_VALUE,
+            2,
+            Md::sha512(),
+        )
+    }
+    // fn dh_group16_sha256() -> Self {
+    //     Self::new(
+    //         "diffie-hellman-group16-sha256",
+    //         &value::P_GROUP16_VALUE,
+    //         2,
+    //         Md::sha256(),
+    //     )
+    // }
+    // fn dh_group17_sha512() -> Self {
+    //     Self::new(
+    //         "diffie-hellman-group17-sha512",
+    //         &value::P_GROUP17_VALUE,
+    //         2,
+    //         Md::sha512(),
+    //     )
+    // }
+    fn dh_group18_sha512() -> Self {
+        Self::new(
+            "diffie-hellman-group18-sha512",
+            &value::P_GROUP18_VALUE,
+            2,
+            Md::sha512(),
+        )
+    }
+}
 
+impl<'a> StandardDiffieHellman for StandardDiffieHellmanImpl<'a> {}
+impl<'a> KeyExchange for StandardDiffieHellmanImpl<'a> {
+    fn generate_key(&mut self) -> Result<Vec<u8>> {
+        let p = BigNum::from_slice(self.p).context(builder::OpenSSL)?;
+        let g = BigNum::from_u32(self.g).context(builder::OpenSSL)?;
 
+        let dh = Dh::from_pqg(p, None, g).context(builder::OpenSSL)?;
+
+        // Unable to call DH_set_length to limit key length
+        // Maybe slower than other ssh clients, but safer
+
+        let key = dh.generate_key().context(builder::OpenSSL)?;
+
+        let public = key.public_key().to_integer();
+        // let private = key.private_key().to_vec();
+
+        self.key = Some(key);
+
+        Ok(public)
+    }
+
+    fn compute_secret_key(&mut self, server_public_key: &[u8]) -> Result<Vec<u8>> {
+        let client_private_key = self
+            .key
+            .as_ref()
+            .context(builder::InvalidOperation {
+                detail: "Generate key first",
+            })?
+            .private_key();
+
+        let server_public_key = BigNum::from_slice(server_public_key).context(builder::OpenSSL)?;
+
+        let mut secret = BigNum::new().context(builder::OpenSSL)?;
+
+        // let client_private_key = BigNum::from_slice(client_private_key)?;
+
+        let p = BigNum::from_slice(self.p).context(builder::OpenSSL)?;
+
+        if self.ctx.is_none() {
+            let ctx = BigNumContext::new().context(builder::OpenSSL)?;
+            self.ctx = Some(ctx);
+        }
+
+        secret
+            .mod_exp(
+                &server_public_key,
+                client_private_key,
+                &p,
+                self.ctx.as_mut().unwrap(),
+            )
+            .context(builder::OpenSSL)?;
+
+        Ok(secret.to_integer())
+    }
+
+    fn compute_hash(&mut self, info: Information<'_>) -> Result<Vec<u8>> {
+        let mut producer = Producer::default();
+
+        producer.put_one(info.client_version);
+        producer.put_one(info.server_version);
+        producer.put_one(info.client_kex_init);
+        producer.put_one(info.server_kex_init);
+
+        producer.put_one(info.server_host_key);
+        producer.put_one(info.client_public_key);
+        producer.put_one(info.server_public_key);
+
+        producer.put_one(info.secret_key); //  tbd
+
+        let mut ctx = MdCtx::new().context(builder::OpenSSL)?;
+
+        ctx.digest_init(self.hasher).context(builder::OpenSSL)?;
+
+        ctx.digest_update(producer.as_bytes())
+            .context(builder::OpenSSL)?;
+
+        let mut output = vec![0; ctx.size()];
+
+        ctx.digest_final(&mut output).context(builder::OpenSSL)?;
+
+        Ok(output)
+    }
+
+    fn name(&self) -> &str {
+        self.name
+    }
+
+    fn compute_communicate_key(
+        &self,
+        secret_key: &[u8],
+        session_id: &[u8],
+        hash: &[u8],
+        version: u8,
+        len: usize,
+    ) -> Result<Vec<u8>> {
+        compute_keys(self.hasher, secret_key, session_id, hash, version, len)
+    }
+
+    // fn compute_communicate_key(
+    //     &self,
+    //     secret_key: &[u8],
+    //     session_id: &[u8],
+    //     hash: &[u8],
+    //     version: u8,
+    //     len: usize,
+    // ) -> super::Result<Vec<u8>> {
+    //     let mut output = vec![];
+
+    //     let mut ctx = MdCtx::new()?;
+    //     ctx.digest_init(self.hasher)?;
+
+    //     ctx.digest_update(secret_key)?;
+    //     ctx.digest_update(hash)?;
+    //     ctx.digest_update(&[version])?;
+    //     ctx.digest_update(session_id)?;
+
+    //     output.resize(ctx.size(), 0);
+
+    //     ctx.digest_final(&mut output)?;
+    //     ctx.digest_init(self.hasher)?;
+
+    //     while output.len() < len {
+    //         ctx.digest_update(secret_key)?;
+    //         ctx.digest_update(hash)?;
+    //         ctx.digest_update(&output)?;
+
+    //         let l = output.len();
+
+    //         output.resize(l + ctx.size(), 0);
+
+    //         ctx.digest_final(&mut output[l..])?;
+    //         ctx.digest_init(self.hasher)?;
+    //     }
+
+    //     output.truncate(len);
+
+    //     Ok(output)
+    // }
+
+    // fn compute_session_key(&self, secret: &[u8], hash: &[u8]) -> super::Result<Vec<u8>> {
+    //     todo!()
+    // }
+}
+
+pub struct Curve25519Impl {
+    name: &'static str,
+    hasher: &'static MdRef,
+    key: Option<PKey<openssl::pkey::Private>>,
+}
+
+impl Curve25519Impl {
+    fn new(name: &'static str, hasher: &'static MdRef) -> Self {
+        Self {
+            name,
+            hasher,
+            key: None,
+        }
+    }
+    fn curve25519_sha256() -> Self {
+        Self::new("curve25519-sha256", Md::sha256())
+    }
+
+    fn curve25519_sha256_libssh() -> Self {
+        Self::new("curve25519-sha256@libssh.org", Md::sha256())
+    }
+}
+
+impl Curve25519 for Curve25519Impl {}
+
+impl KeyExchange for Curve25519Impl {
+    fn name(&self) -> &str {
+        self.name
+    }
+
+    fn generate_key(&mut self) -> Result<Vec<u8>> {
+        let mut ctx = PkeyCtx::new_id(Id::X25519).context(builder::OpenSSL)?;
+        ctx.keygen_init().context(builder::OpenSSL)?;
+        let key = ctx.keygen().context(builder::OpenSSL)?;
+        let public_key = key.raw_public_key().context(builder::OpenSSL)?;
+        self.key = Some(key);
+        Ok(public_key)
+    }
+
+    fn compute_secret_key(&mut self, server_public_key: &[u8]) -> Result<Vec<u8>> {
+        let private_key = self.key.as_ref().context(builder::InvalidOperation {
+            detail: "Generate key first",
+        })?;
+        let server_public = PKey::public_key_from_raw_bytes(server_public_key, Id::X25519)
+            .context(builder::OpenSSL)?;
+
+        let mut ctx = PkeyCtx::new(&private_key).context(builder::OpenSSL)?;
+        ctx.derive_init().context(builder::OpenSSL)?;
+        ctx.derive_set_peer(&server_public)
+            .context(builder::OpenSSL)?;
+        let size = ctx.derive(None).context(builder::OpenSSL)?;
+        let mut secret_key = vec![0; size];
+        ctx.derive(Some(&mut secret_key))
+            .context(builder::OpenSSL)?;
+        Ok(secret_key.into_integer())
+    }
+
+    fn compute_hash(&mut self, info: Information<'_>) -> Result<Vec<u8>> {
+        let mut producer = Producer::default();
+
+        let client_version = info.client_version;
+        let server_version = info.server_version;
+
+        producer.put_one(client_version);
+        producer.put_one(server_version);
+        producer.put_one(info.client_kex_init);
+        producer.put_one(info.server_kex_init);
+
+        producer.put_one(info.server_host_key);
+        producer.put_one(info.client_public_key);
+        producer.put_one(info.server_public_key);
+
+        producer.put_one(info.secret_key); //  tbd
+
+        let mut ctx = MdCtx::new().context(builder::OpenSSL)?;
+
+        ctx.digest_init(self.hasher).context(builder::OpenSSL)?;
+
+        ctx.digest_update(producer.as_bytes())
+            .context(builder::OpenSSL)?;
+
+        let mut output = vec![0; ctx.size()];
+
+        ctx.digest_final(&mut output).context(builder::OpenSSL)?;
+
+        Ok(output)
+    }
+
+    fn compute_communicate_key(
+        &self,
+        secret_key: &[u8],
+        session_id: &[u8],
+        hash: &[u8],
+        version: u8,
+        len: usize,
+    ) -> Result<Vec<u8>> {
+        compute_keys(self.hasher, secret_key, session_id, hash, version, len)
+    }
+}
+
+pub struct MlKem768X25519 {
+    mlkem: Option<MlKemKeyPair<2400, 1184>>,
+    x25519: Option<PKey<Private>>,
+}
+
+impl Hybrid for MlKem768X25519 {}
+
+impl MlKem768X25519 {
+    fn new() -> Self {
+        Self {
+            mlkem: None,
+            x25519: None,
+        }
+    }
+}
+
+impl KeyExchange for MlKem768X25519 {
+    fn name(&self) -> &str {
+        "mlkem768x25519-sha256"
+    }
+
+    fn generate_key(&mut self) -> Result<Vec<u8>> {
+        let mut bytes = [0u8; 64];
+        let mut rng = rand::rng();
+        rng.fill(&mut bytes);
+        let key = libcrux_ml_kem::mlkem768::portable::generate_key_pair(bytes);
+
+        let mut public_key = key.public_key().as_slice().to_vec();
+
+        self.mlkem = Some(key);
+        {
+            let mut ctx = PkeyCtx::new_id(Id::X25519).context(builder::OpenSSL)?;
+            ctx.keygen_init().context(builder::OpenSSL)?;
+            let key = ctx.keygen().context(builder::OpenSSL)?;
+            public_key.extend(key.raw_public_key().context(builder::OpenSSL)?);
+
+            self.x25519 = Some(key);
+        }
+
+        Ok(public_key)
+    }
+
+    fn compute_secret_key(&mut self, server_public_key: &[u8]) -> Result<Vec<u8>> {
+        let mlkem = self.mlkem.as_ref().context(builder::InvalidOperation {
+            detail: "mlkem key not generated",
+        })?;
+        // assert_eq!(server_public_key.len(), 1088 + 32);
+        if server_public_key.len() != 1088 + 32 {
+            return Err(super::KeyLengthMismatchSnafu.build().into());
+        }
+        let s: [u8; 1088] = server_public_key[..1088].try_into().unwrap();
+        let mlkem_ciphertext: MlKemCiphertext<1088> = MlKemCiphertext::from(s);
+        let secret_key1 =
+            libcrux_ml_kem::mlkem768::portable::decapsulate(mlkem.private_key(), &mlkem_ciphertext);
+        let secret_key2 = {
+            let private_key = self.x25519.as_ref().context(builder::InvalidOperation {
+                detail: "Generate key first",
+            })?;
+            let server_public =
+                PKey::public_key_from_raw_bytes(&server_public_key[1088..], Id::X25519)
+                    .context(builder::OpenSSL)?;
+
+            let mut ctx = PkeyCtx::new(&private_key).context(builder::OpenSSL)?;
+            ctx.derive_init().context(builder::OpenSSL)?;
+            ctx.derive_set_peer(&server_public)
+                .context(builder::OpenSSL)?;
+            let size = ctx.derive(None).context(builder::OpenSSL)?;
+            let mut secret_key = vec![0; size];
+            ctx.derive(Some(&mut secret_key))
+                .context(builder::OpenSSL)?;
+            secret_key
+        };
+
+        let mut hasher = MdCtx::new().context(builder::OpenSSL)?;
+
+        hasher.digest_init(Md::sha256()).context(builder::OpenSSL)?;
+        hasher
+            .digest_update(&secret_key1)
+            .context(builder::OpenSSL)?;
+
+        hasher
+            .digest_update(&secret_key2)
+            .context(builder::OpenSSL)?;
+
+        let mut output = vec![0; hasher.size()];
+        hasher.digest_final(&mut output).context(builder::OpenSSL)?;
+
+        Ok(output)
+    }
+
+    fn compute_hash(&mut self, info: Information<'_>) -> Result<Vec<u8>> {
+        let mut producer = Producer::default();
+
+        let client_version = info.client_version;
+        let server_version = info.server_version;
+
+        producer.put_one(client_version);
+        producer.put_one(server_version);
+        producer.put_one(info.client_kex_init);
+        producer.put_one(info.server_kex_init);
+
+        producer.put_one(info.server_host_key);
+        producer.put_one(info.client_public_key);
+        producer.put_one(info.server_public_key);
+
+        producer.put_one(info.secret_key); //  tbd
+
+        let mut ctx = MdCtx::new().context(builder::OpenSSL)?;
+
+        ctx.digest_init(Md::sha256()).context(builder::OpenSSL)?;
+
+        ctx.digest_update(producer.as_bytes())
+            .context(builder::OpenSSL)?;
+
+        let mut output = vec![0; ctx.size()];
+
+        ctx.digest_final(&mut output).context(builder::OpenSSL)?;
+
+        Ok(output)
+    }
+
+    fn compute_communicate_key(
+        &self,
+        secret_key: &[u8],
+        session_id: &[u8],
+        hash: &[u8],
+        version: u8,
+        len: usize,
+    ) -> Result<Vec<u8>> {
+        compute_keys(Md::sha256(), secret_key, session_id, hash, version, len)
+    }
+}
+
+fn compute_keys(
+    md: &'static MdRef,
+    secret_key: &[u8],
+    session_id: &[u8],
+    hash: &[u8],
+    version: u8,
+    len: usize,
+) -> Result<Vec<u8>> {
+    let mut output = vec![];
+
+    let mut ctx = MdCtx::new().context(builder::OpenSSL)?;
+    ctx.digest_init(md).context(builder::OpenSSL)?;
+
+    ctx.digest_update(secret_key).context(builder::OpenSSL)?;
+    ctx.digest_update(hash).context(builder::OpenSSL)?;
+    ctx.digest_update(&[version]).context(builder::OpenSSL)?;
+    ctx.digest_update(session_id).context(builder::OpenSSL)?;
+
+    output.resize(ctx.size(), 0);
+
+    ctx.digest_final(&mut output).context(builder::OpenSSL)?;
+    ctx.digest_init(md).context(builder::OpenSSL)?;
+
+    while output.len() < len {
+        ctx.digest_update(secret_key).context(builder::OpenSSL)?;
+        ctx.digest_update(hash).context(builder::OpenSSL)?;
+        ctx.digest_update(&output).context(builder::OpenSSL)?;
+
+        let l = output.len();
+
+        output.resize(l + ctx.size(), 0);
+
+        ctx.digest_final(&mut output[l..])
+            .context(builder::OpenSSL)?;
+        ctx.digest_init(md).context(builder::OpenSSL)?;
+    }
+
+    output.truncate(len);
+
+    Ok(output)
+}
+
+mod value {
     const fn is_hex_ws(b: u8) -> bool {
         matches!(b, b' ' | b'\n' | b'\r' | b'\t')
     }
@@ -1029,10 +973,12 @@ use crate::ssh::buffer::Producer;
 
     const_hex!(
         pub const P_GROUP1_VALUE = r#"
-        FFFFFFFF FFFFFFFF C90FDAA2 2168C234 C4C6628B 80DC1CD1
-        29024E08 8A67CC74 020BBEA6 3B139B22 514A0879 8E3404DD
-        EF9519B3 CD3A431B 302B0A6D F25F1437 4FE1356D 6D51C245
-        E485B576 625E7EC6 F44C42E9 A63A3620 FFFFFFFF FFFFFFFF
+            FFFFFFFF FFFFFFFF C90FDAA2 2168C234 C4C6628B 80DC1CD1
+            29024E08 8A67CC74 020BBEA6 3B139B22 514A0879 8E3404DD
+            EF9519B3 CD3A431B 302B0A6D F25F1437 4FE1356D 6D51C245
+            E485B576 625E7EC6 F44C42E9 A637ED6B 0BFF5CB6 F406B7ED
+            EE386BFB 5A899FA5 AE9F2411 7C4B1FE6 49286651 ECE65381
+            FFFFFFFF FFFFFFFF
         "#;
     );
     const_hex!(
@@ -1059,17 +1005,17 @@ use crate::ssh::buffer::Producer;
     );
     const_hex!(
         pub const P_GROUP14_VALUE = r#"
-        FFFFFFFF FFFFFFFF C90FDAA2 2168C234 C4C6628B 80DC1CD1
-        29024E08 8A67CC74 020BBEA6 3B139B22 514A0879 8E3404DD
-        EF9519B3 CD3A431B 302B0A6D F25F1437 4FE1356D 6D51C245
-        E485B576 625E7EC6 F44C42E9 A637ED6B 0BFF5CB6 F406B7ED
-        EE386BFB 5A899FA5 AE9F2411 7C4B1FE6 49286651 ECE45B3D
-        C2007CB8 A163BF05 98DA4836 1C55D39A 69163FA8 FD24CF5F
-        83655D23 DCA3AD96 1C62F356 208552BB 9ED52907 7096966D
-        670C354E 4ABC9804 F1746C08 CA18217C 32905E46 2E36CE3B
-        E39E772C 180E8603 9B2783A2 EC07A28F B5C55DF0 6F4C52C9
-        DE2BCBF6 95581718 3995497C EA956AE5 15D22618 98FA0510
-        15728E5A 8AACAA68 FFFFFFFF FFFFFFFF
+            FFFFFFFF FFFFFFFF C90FDAA2 2168C234 C4C6628B 80DC1CD1
+            29024E08 8A67CC74 020BBEA6 3B139B22 514A0879 8E3404DD
+            EF9519B3 CD3A431B 302B0A6D F25F1437 4FE1356D 6D51C245
+            E485B576 625E7EC6 F44C42E9 A637ED6B 0BFF5CB6 F406B7ED
+            EE386BFB 5A899FA5 AE9F2411 7C4B1FE6 49286651 ECE45B3D
+            C2007CB8 A163BF05 98DA4836 1C55D39A 69163FA8 FD24CF5F
+            83655D23 DCA3AD96 1C62F356 208552BB 9ED52907 7096966D
+            670C354E 4ABC9804 F1746C08 CA18217C 32905E46 2E36CE3B
+            E39E772C 180E8603 9B2783A2 EC07A28F B5C55DF0 6F4C52C9
+            DE2BCBF6 95581718 3995497C EA956AE5 15D22618 98FA0510
+            15728E5A 8AACAA68 FFFFFFFF FFFFFFFF
         "#;
     );
     const_hex!(
@@ -1115,6 +1061,7 @@ use crate::ssh::buffer::Producer;
         287C5947 4E6BC05D 99B2964F A090C3A2 233BA186 515BE7ED
         1F612970 CEE2D7AF B81BDD76 2170481C D0069127 D5B05AA9
         93B4EA98 8D8FDDC1 86FFB7DC 90A6C08F 4DF435C9 34063199
+        FFFFFFFF FFFFFFFF
         "#;
     );
 
@@ -1192,160 +1139,13 @@ use crate::ssh::buffer::Producer;
         "#;
     );
 
-
     const G_VALUE: usize = 2;
-
-    pub struct keyPair {
-        public: Vec<u8>,
-        private: Vec<u8>
-    }
-
-    pub trait StandardDiffieHellman {
-        // generate random private key and then generate public key from private key
-        fn generate_key(&mut self) -> super::Result<keyPair>;
-        // compute shared secret key from server public key and client_private key that genrated by generate_key
-        fn compute_secret_key(&mut self, server_public_key: &[u8], client_private_key: &[u8]) -> super::Result<Vec<u8>>;
-        fn compute_hash(&self, info: Information<'_>) -> super::Result<Vec<u8>>;
-        // fn compute_session_key(&self, secret: &[u8], hash: &[u8]) -> super::Result<Vec<u8>>;
-        fn compute_communicate_key(&self, secret_key: &[u8], session_id: &[u8], hash: &[u8], version: u8, len: usize) -> super::Result<Vec<u8>>;
-    }
-
-    pub struct Information<'a> {
-        client_banner: &'a str,
-        server_banner: &'a str,
-        client_kex_init: &'a [u8],
-        server_kex_init: &'a [u8],
-        server_host_key: &'a [u8],
-        client_public_key: &'a [u8],
-        server_public_key: &'a [u8],
-        secret_key: &'a [u8]
-    }
-
-    pub struct DiffieHellman {
-        p: &'static [u8],
-        g: u32,
-        ctx: BigNumContext,
-        hasher: &'static MdRef,
-    }
-
-    impl StandardDiffieHellman for DiffieHellman {
-        fn generate_key(&mut self) -> super::Result<keyPair> {
-
-            let p = BigNum::from_slice(self.p)?;
-            let g = BigNum::from_u32(self.g)?;
-
-            let dh = Dh::from_pqg(p, None, g)?;
-
-            // Unable to call DH_set_length to limit key length
-            // Maybe slower than other ssh clients, but safer
-
-            let key = dh.generate_key()?;
-
-            let public = key.public_key().to_vec();
-            let private = key.private_key().to_vec();
-
-            Ok(keyPair { public, private })
-        }
-    
-        fn compute_secret_key(&mut self, server_public_key: &[u8], client_private_key: &[u8]) -> super::Result<Vec<u8>> {
-
-            let server_public_key = BigNum::from_slice(server_public_key)?;
-
-            let mut secret = BigNum::new()?;
-
-            let client_private_key = BigNum::from_slice(client_private_key)?;
-
-            let p = BigNum::from_slice(self.p)?;
-
-            secret.mod_exp(&server_public_key, &client_private_key, &p, &mut self.ctx)?;
-
-
-            Ok(secret.to_vec())
-        }
-    
-        fn compute_hash(&self, info: Information<'_>) -> super::Result<Vec<u8>> {
-            let mut producer = Producer::default();
-
-            let client_version = info.client_banner.trim_end_matches("\r\n");
-            let server_version = info.server_banner.trim_end_matches("\r\n");
-
-            producer.put_one(client_version);
-            producer.put_one(server_version);
-            producer.put_one(info.client_kex_init);
-            producer.put_one(info.server_kex_init);
-
-            producer.put_one(info.server_host_key);
-            producer.put_one(info.client_public_key);
-            producer.put_bytes(info.server_public_key);
-
-
-            producer.put_one(info.secret_key); //  tbd
-
-            let mut ctx = MdCtx::new()?;
-
-            ctx.digest_init(self.hasher)?;
-
-            ctx.digest_update(producer.as_bytes())?;
-
-
-            let mut output = vec![0; ctx.size()];
-
-
-            ctx.digest_final(&mut output)?;
-
-
-            Ok(output)
-        }
-        
-        fn compute_communicate_key(&self, secret_key: &[u8], session_id: &[u8], hash: &[u8], version: u8, len: usize) -> super::Result<Vec<u8>> {
-            let mut output = vec![];
-
-            let mut ctx = MdCtx::new()?;
-            ctx.digest_init(self.hasher)?;
-
-            ctx.digest_update(secret_key)?;
-            ctx.digest_update(hash)?;
-            ctx.digest_update(&[version])?;
-            ctx.digest_update(session_id)?;
-
-            output.resize(ctx.size(), 0);
-
-            ctx.digest_final(&mut output)?;
-            ctx.digest_init(self.hasher)?;
-
-
-            while output.len() < len {
-                ctx.digest_update(secret_key)?;
-                ctx.digest_update(hash)?;
-                ctx.digest_update(&output)?;
-
-                let l = output.len();
-
-                output.resize(l + ctx.size(), 0);
-
-                ctx.digest_final(&mut output[l..])?;
-                ctx.digest_init(self.hasher)?;
-
-            }
-
-            output.truncate(len);
-
-
-            Ok(output)
-
-        }
-    
-        // fn compute_session_key(&self, secret: &[u8], hash: &[u8]) -> super::Result<Vec<u8>> {
-        //     todo!()
-        // }
-    }
-
-
-    pub trait DiffieHellmanGroupExchange {}
-
-    pub trait EcdhExchange {}
-
-    pub trait X25519Exchange {}
-
-    pub trait HybridKem {}
 }
+// pub trait Messenger {}
+
+// pub trait GroupExchange: KeyExchange {
+//     fn max(&self) -> u32;
+//     fn min(&self) -> u32;
+//     fn number_of_bits(&self) -> u32;
+//     fn initialize(&mut self, p: &[u8], g: &[u8]) -> Result<()>;
+// }

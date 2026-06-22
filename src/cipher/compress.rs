@@ -1,8 +1,10 @@
 use super::*;
-use crate::error::{builder, Result};
+use crate::error::{Result, builder};
 use flate2::{Compress, Compression, Decompress, Status};
-use indexmap::IndexMap;
 use std::mem;
+
+use super::Factory;
+use indexmap::IndexMap;
 
 algo_list!(
     encode_all,
@@ -24,28 +26,28 @@ algo_list!(
     "none" => Never::default(),
 );
 
-pub fn none_encode() -> AlgoFactory<dyn Encode + Send> {
+pub fn none_encode() -> Factory<dyn Encode + Send> {
     create_factory!(Never::default())
 }
 
-pub fn none_decode() -> AlgoFactory<dyn Decode + Send> {
+pub fn none_decode() -> Factory<dyn Decode + Send> {
     create_factory!(Never::default())
 }
 
 pub trait Encode {
-    fn compress_in_auth(&self) -> bool;
+    fn compress_in_authentication(&self) -> bool;
     fn update(&mut self, data: &[u8]) -> Result<()>;
     fn finalize(&mut self) -> Result<Vec<u8>>;
 }
 
 pub trait Decode {
-    fn compress_in_auth(&self) -> bool;
+    fn compress_in_authentication(&self) -> bool;
     fn update(&mut self, data: &[u8]) -> Result<()>;
     fn finalize(&mut self) -> Result<Vec<u8>>;
 }
 
 impl Encode for Never {
-    fn compress_in_auth(&self) -> bool {
+    fn compress_in_authentication(&self) -> bool {
         false
     }
 
@@ -60,7 +62,7 @@ impl Encode for Never {
 }
 
 impl Decode for Never {
-    fn compress_in_auth(&self) -> bool {
+    fn compress_in_authentication(&self) -> bool {
         false
     }
 
@@ -96,7 +98,7 @@ impl ZEncoder {
 }
 
 impl Encode for ZEncoder {
-    fn compress_in_auth(&self) -> bool {
+    fn compress_in_authentication(&self) -> bool {
         self.compress_in_auth
     }
 
@@ -120,7 +122,7 @@ impl Encode for ZEncoder {
                     }
                     Ok(())
                 }
-                _ => builder::CompressFailed.fail(), //Err(Error::CompressFailed),
+                _ => super::CompressSnafu.fail()?, //Err(Error::CompressFailed),
             };
         }
     }
@@ -147,7 +149,7 @@ impl ZDecoder {
 }
 
 impl Decode for ZDecoder {
-    fn compress_in_auth(&self) -> bool {
+    fn compress_in_authentication(&self) -> bool {
         self.compress_in_auth
     }
 
@@ -173,7 +175,7 @@ impl Decode for ZDecoder {
                     }
                     Ok(())
                 }
-                _ => builder::CompressFailed.fail(), //Err(Error::CompressFailed),
+                _ => super::CompressSnafu.fail()?, //Err(Error::CompressFailed),
             };
         }
 

@@ -1,78 +1,74 @@
+mod cipher;
+mod error;
 #[macro_use]
-mod ssh;
-pub mod channel;
-pub mod cipher;
-pub mod error;
-pub mod forward;
-pub mod handshake;
-pub mod keys;
-mod msg;
-mod project;
-pub mod scp;
+pub mod ssh;
+#[macro_use]
+mod log;
+mod key;
 pub mod session;
-pub mod sftp;
+mod stream;
+
+const DEFAULT_CHANNEL_CAPACITY: usize = 256;
+
 
 #[cfg(test)]
-mod test;
+mod test {
+    use serde::{Serialize, Deserialize};
+    use tokio::net::TcpStream;
+    use crate::session;
 
-type MSender<T> = mpsc::UnboundedSender<T>;
-type MReceiver<T> = mpsc::UnboundedReceiver<T>;
-type OSender<T> = oneshot::Sender<T>;
-type OReceiver<T> = oneshot::Receiver<T>;
-type MWSender<T> = mpsc::WeakUnboundedSender<T>;
-type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + Sync + 'a>>;
+    #[derive(Debug, Serialize, Deserialize)]
+    pub struct Config {
+        target: Target,
+        authentication: Authentication
+    }
 
-trait BigNumExt {
-    fn to_ssh_bytes(&self) -> Vec<u8>;
-}
-
-impl BigNumExt for openssl::bn::BigNum {
-    fn to_ssh_bytes(&self) -> Vec<u8> {
-        // https://github.com/openssh/openssh-portable/blob/master/sshbuf-getput-basic.c#L585
-        let mut bytes = vec![0; 1];
-        let bn = self.to_vec();
-        if !bn.is_empty() && bn[0] & 0x80 != 0 {
-            bytes.extend(bn);
-        } else {
-            bytes = bn;
+    impl Config {
+        pub async fn load() -> anyhow::Result<Self> {
+            let content = tokio::fs::read_to_string("./Test.toml").await?;
+            let config: Config = toml::from_str(&content)?;
+            Ok(config)
         }
-        bytes
+
+
+        pub async fn connect(&self) -> anyhow::Result<TcpStream> {
+            let tcp = TcpStream::connect((self.target.host.clone(), self.target.port)).await?;
+            Ok(tcp)
+        }
+
+        pub async fn open_session(&self) -> anyhow::Result<session::Session> {
+            let stream = self.connect().await?;
+
+            let config = session::Config::default();
+
+            let notifier = session::DefaultNotifier::default();
+
+            let session = session::Session::handshake(stream, config, notifier).await?;
+            Ok(session)
+        }
+
+
+        pub async fn authenticate_password(&self, session: &session::Session) -> anyhow::Result<()> {
+            let status = session.authenticate_password(self.authentication.username.to_string(),
+                                                       self.authentication.password.to_string()).await?;
+
+            assert!(status.success());
+            Ok(())
+        }
+    }
+
+    #[derive(Debug, Serialize, Deserialize)]
+    pub struct Target {
+        host: String,
+        port: u16
+    }
+
+    #[derive(Debug, Serialize, Deserialize)]
+    pub struct Authentication {
+        username: String,
+        password: String,
+        public_key: String,
+        private_key: String,
+        certificate: String,
     }
 }
-
-impl BigNumExt for openssl::bn::BigNumRef {
-    fn to_ssh_bytes(&self) -> Vec<u8> {
-        // https://github.com/openssh/openssh-portable/blob/master/sshbuf-getput-basic.c#L585
-        let mut bytes = vec![0; 1];
-        let bn = self.to_vec();
-        if !bn.is_empty() && bn[0] & 0x80 != 0 {
-            bytes.extend(bn);
-        } else {
-            bytes = bn;
-        }
-        bytes
-    }
-}
-
-fn m_channel<T>() -> (MSender<T>, MReceiver<T>) {
-    mpsc::unbounded_channel()
-}
-
-fn o_channel<T>() -> (OSender<T>, OReceiver<T>) {
-    oneshot::channel()
-}
-
-use std::{future::Future, pin::Pin};
-
-pub use async_trait::async_trait;
-pub use cipher::{
-    compress::{Decode, Encode},
-    crypt::{Decrypt, Encrypt},
-    hash::Hash,
-    kex::{KeyExChange, KexAlgorithm, StandardKexProtocol},
-    mac::Mac,
-    sign::{Signature, Verify},
-    AlgoFactory,
-};
-pub use openssl;
-use tokio::sync::{mpsc, oneshot};

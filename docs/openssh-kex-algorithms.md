@@ -760,6 +760,205 @@ ECDH_compute_key(kbuf, klen, dh_pub, key, NULL);
 // 内部执行：P = 私钥·对方公钥，取 P 的 x 坐标作为 K
 ```
 
+#### 4.3.1 ECDH 数学原理
+
+ECDH（Elliptic Curve Diffie-Hellman）是经典 DH 算法在椭圆曲线上的类比实现。两者数学结构完全对应，但运算基础从有限域乘法群变为椭圆曲线加法群。
+
+**核心概念**：
+
+- **椭圆曲线** `E(F_p)`：定义在有限域 `F_p` 上的所有点 `(x, y)` 满足方程 `y² = x³ + ax + b (mod p)`，加上一个“无穷远点” `O`
+- **基点 `G`**：曲线上一个预定义的固定点，其阶 `n` 是大素数（即 `n·G = O`）
+- **标量乘法 `k·G`**：将 `G` 与自身相加 `k` 次（曲线上的点加法运算）
+
+**密钥交换过程**：
+
+```
+客户端：
+  ① 随机生成私钥 d_C ∈ [1, n-1]    （大整数）
+  ② 计算公钥 Q_C = d_C · G          （曲线上的点）
+
+服务端：
+  ③ 随机生成私钥 d_S ∈ [1, n-1]
+  ④ 计算公钥 Q_S = d_S · G
+
+双方各自计算共享点：
+  客户端: P = d_C · Q_S = d_C · (d_S · G) = (d_C · d_S) · G
+  服务端: P = d_S · Q_C = d_S · (d_C · G) = (d_C · d_S) · G
+  结果相同！
+
+共享秘密: K = P.x （取共享点 P 的 x 坐标）
+```
+
+**安全性**：基于椭圆曲线离散对数问题（ECDLP）——已知 `Q` 和 `G`，求 `d` 使得 `Q = d·G`，在计算上是不可行的。
+
+**与经典 DH 的数学对应**：
+
+| 概念 | 经典 DH | ECDH |
+|------|--------|------|
+| 群 | 有限域乘法群 `Z_p*` | 椭圆曲线加法群 `E(F_p)` |
+| 群元素 | 大整数 | 曲线上的点 `(x, y)` |
+| 群运算 | 模幂 `g^x mod p` | 标量乘法 `x·G` |
+| 生成元 | `g`（整数） | `G`（曲线点） |
+| 私钥 | `x ∈ [2, p-2]` | `d ∈ [1, n-1]` |
+| 公钥 | `e = g^x mod p` | `Q = d·G`（点） |
+| 共享秘密 | `K = f^x mod p` | `K = (d·Q).x`（点的 x 坐标） |
+| 困难问题 | 离散对数（DLP） | 椭圆曲线离散对数（ECDLP） |
+| 同等安全所需位数 | 2048-bit | 256-bit |
+
+**NIST 曲线的参数**：
+
+| 曲线 | 域大小 | 私钥位数 | 安全强度 | 基点阶 n |
+|------|:-----:|:-----:|:-----:|------|
+| P-256 | 256-bit | 256 | 128-bit | 256-bit 素数 |
+| P-384 | 384-bit | 384 | 192-bit | 384-bit 素数 |
+| P-521 | 521-bit | 521 | 256-bit | 521-bit 素数 |
+
+#### 4.3.2 OpenSSL 调用链详解
+
+OpenSSH 的 ECDH 完全依赖 OpenSSL 的 EC/ECDH API，共涉及三个核心步骤。以下是每一步的 OpenSSL 调用链：
+
+**步骤 ① 创建曲线对象**：
+
+```c
+EC_KEY *client_key = EC_KEY_new_by_curve_name(kex->ec_nid);
+```
+
+- `kex->ec_nid` 是 OpenSSL 内部的曲线标识符（整数 NID），由 `kex-names.c` 中的 `kexalgs[]` 注册表绑定
+- `EC_KEY_new_by_curve_name()` 一次性完成：分配 `EC_KEY` 对象 + 设置曲线参数 `(p, a, b, G, n, h)`
+- 三种曲线对应的 NID：
+
+```c
+// kex-names.c 中的绑定
+{ KEX_ECDH_SHA2_NISTP256, KEX_ECDH_SHA2, NID_X9_62_prime256v1, SSH_DIGEST_SHA256 }
+{ KEX_ECDH_SHA2_NISTP384, KEX_ECDH_SHA2, NID_secp384r1,        SSH_DIGEST_SHA384 }
+{ KEX_ECDH_SHA2_NISTP521, KEX_ECDH_SHA2, NID_secp521r1,        SSH_DIGEST_SHA512 }
+```
+
+**步骤 ② 生成密钥对**：
+
+```c
+if (EC_KEY_generate_key(client_key) != 1) {
+    r = SSH_ERR_LIBCRYPTO_ERROR;
+    goto out;
+}
+```
+
+`EC_KEY_generate_key()` 内部流程：
+
+```
+① 生成随机私钥 d ∈ [1, n-1]（来自 OpenSSL CSPRNG）
+② 计算公钥 Q = d·G（椭圆曲线标量乘法）
+③ 验证 Q 是否在曲线上且非无穷远点
+④ 将 (d, Q) 存入 EC_KEY 对象
+```
+
+生成后可通过以下 API 取出私钥和公钥：
+
+```c
+const BIGNUM *private_key = EC_KEY_get0_private_key(client_key);  // 私钥 d
+const EC_POINT *public_key = EC_KEY_get0_public_key(client_key);  // 公钥 Q
+const EC_GROUP *group = EC_KEY_get0_group(client_key);            // 曲线参数
+```
+
+**步骤 ③ 序列化公钥用于发送**：
+
+```c
+// 将公钥 Q（曲线点）序列化为 SSH wire format 并放入 sshbuf
+sshbuf_put_ec(buf, public_key, group);
+
+// 跳过长度前缀（sshbuf_get_u32 返回后指针移到实际数据开头）
+sshbuf_get_u32(buf, NULL);
+```
+
+`sshbuf_put_ec()` 内部将 EC 点序列化为 **未压缩格式**：
+
+```
+0x04 || x坐标字节 || y坐标字节
+```
+
+其中 `0x04` 是未压缩格式标识符。这就是发送给对方的公钥 Q_C 或 Q_S。
+
+**步骤 ④ 计算共享秘密**：
+
+```c
+static int
+kex_ecdh_dec_key_group(struct kex *kex, const struct sshbuf *ec_blob,
+    EC_KEY *key, const EC_GROUP *group, struct sshbuf **shared_secretp)
+{
+    // 1. 从 blob 中反序列化对方的公钥
+    EC_POINT *dh_pub = EC_POINT_new(group);
+    sshbuf_get_ec(buf, dh_pub, group);  // 解析 0x04||x||y 格式
+
+    // 2. 验证对方公钥合法性
+    sshkey_ec_validate_public(group, dh_pub);
+    // 验证：点不为 O、在曲线上、不在小子群中
+
+    // 3. 确定共享秘密的字节长度
+    size_t klen = (EC_GROUP_get_degree(group) + 7) / 8;
+    // P-256: (256+7)/8 = 32 字节
+    // P-384: (384+7)/8 = 48 字节
+    // P-521: (521+7)/8 = 66 字节
+
+    // 4. 调用 OpenSSL ECDH 计算共享秘密
+    ECDH_compute_key(kbuf, klen, dh_pub, key, NULL);
+    // 内部执行：
+    //   P = d_C · Q_S  （客户端）或 P = d_S · Q_C  （服务端）
+    //   取 P 的 x 坐标，填充到 kbuf[0..klen-1]
+
+    // 5. 转为 BIGNUM 并以 mpint 格式存入 sshbuf
+    BN_bin2bn(kbuf, klen, shared_secret);
+    sshbuf_put_bignum2(buf, shared_secret);  // mpint 编码的 K
+}
+```
+
+**完整调用时序图**：
+
+```
+客户端 (kex_ecdh_keypair)              服务端 (kex_ecdh_enc)
+  │                                      │
+  │ EC_KEY_new_by_curve_name(nid)        │
+  │ EC_KEY_generate_key(key)             │
+  │   → d_C (随机), Q_C = d_C·G         │
+  │ sshbuf_put_ec(buf, Q_C, group)       │
+  │   → 序列化公钥为 0x04||x||y         │
+  │                                      │
+  │──── {Q_C} ──────────────────────────>│
+  │                                      │
+  │                    EC_KEY_new_by_curve_name(nid)
+  │                    EC_KEY_generate_key(key)
+  │                      → d_S (随机), Q_S = d_S·G
+  │                    sshbuf_put_ec(buf, Q_S, group)
+  │                    ECDH_compute_key(kbuf, klen, Q_C, key, NULL)
+  │                      → K = (d_S · Q_C).x
+  │                    BN_bin2bn(kbuf, klen, shared_secret)
+  │                    sshbuf_put_bignum2(buf, shared_secret)
+  │                                      │
+  │<──── {Q_S} ──────────────────────────│
+  │                                      │
+  │ sshbuf_get_ec(buf, dh_pub, group)    │
+  │   → 解析 Q_S                         │
+  │ sshkey_ec_validate_public(group, Q_S) │
+  │ ECDH_compute_key(kbuf, klen, Q_S, key, NULL)
+  │   → K = (d_C · Q_S).x              │
+  │   = (d_C · d_S · G).x              │
+  │   = (d_S · d_C · G).x              │
+  │   = 服务端的 K ✓                     │
+  │ BN_bin2bn(kbuf, klen, shared_secret) │
+  │ sshbuf_put_bignum2(buf, shared_secret)│
+```
+
+**OpenSSL API 汇总**：
+
+| API | 作用 | 调用时机 |
+|-----|------|----------|
+| `EC_KEY_new_by_curve_name(nid)` | 创建指定曲线的 EC_KEY 对象 | 生成密钥对前 |
+| `EC_KEY_generate_key(key)` | 生成随机私钥 d，计算公钥 Q=d·G | 密钥对生成 |
+| `EC_KEY_get0_public_key(key)` | 取出公钥 Q（EC_POINT*） | 序列化前 |
+| `EC_KEY_get0_group(key)` | 取出曲线参数（EC_GROUP*） | 序列化/反序列化时 |
+| `EC_POINT_new(group)` | 分配一个曲线点对象 | 反序列化对方公钥前 |
+| `ECDH_compute_key(kbuf, klen, pub, key, NULL)` | 计算 P=d·Q，取 x 坐标存入 kbuf | 共享秘密计算 |
+| `EC_KEY_free(key)` | 释放 EC_KEY（含私钥清零） | KEX 完成后 |
+
 ### 4.4 Curve25519（2 种）
 
 **适用算法**：`curve25519-sha256`、`curve25519-sha256@libssh.org`

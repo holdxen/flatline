@@ -1,5 +1,54 @@
 #[macro_use]
 pub mod buffer;
-pub mod common;
-pub mod packet;
+pub mod msg;
 pub mod stream;
+
+pub mod protocol;
+
+pub trait MultiplePrecisionInteger {
+    fn to_integer(&self) -> Vec<u8>;
+    fn into_integer(self) -> Vec<u8>;
+}
+
+impl MultiplePrecisionInteger for Vec<u8> {
+    fn to_integer(&self) -> Vec<u8> {
+        self.to_vec().into_integer()
+    }
+
+    fn into_integer(mut self) -> Vec<u8> {
+        while self.len() > 0 && self[0] == 0 {
+            self.remove(0);
+        }
+
+        if self.is_empty() {
+            return vec![0; 4];
+        }
+
+        if self[0] & 0x80 != 0 {
+            self.insert(0, 0);
+            self
+        } else {
+            self
+        }
+    }
+}
+
+impl MultiplePrecisionInteger for openssl::bn::BigNum {
+    fn to_integer(&self) -> Vec<u8> {
+        self.to_vec().into_integer()
+    }
+
+    fn into_integer(self) -> Vec<u8> {
+        self.to_vec().into_integer()
+    }
+}
+
+impl MultiplePrecisionInteger for openssl::bn::BigNumRef {
+    fn to_integer(&self) -> Vec<u8> {
+        self.to_vec().into_integer()
+    }
+
+    fn into_integer(self) -> Vec<u8> {
+        self.to_vec().into_integer()
+    }
+}

@@ -1,0 +1,10 @@
+[target]
+host = "10.211.55.4"
+port = 22
+
+[authentication]
+private_key = ".ssh/id_rsa"
+public_key = ".ssh/id_rsa.pub"
+certificate = ".ssh/id_rsa-cert.pub"
+username = "parallels"
+password = "qwer1234"
