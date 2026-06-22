@@ -9,7 +9,8 @@ use tokio::net::TcpListener;
 use tokio::net::TcpStream;
 use tokio::sync::watch;
 
-include!("./user.conf");
+mod common;
+use common::*;
 
 async fn copy(first: &mut TcpStream, second: &mut flatline::forward::Stream) {
     let mut buf = Vec::with_capacity(512);
@@ -61,7 +62,7 @@ async fn main() {
                 let mut remote = session
                     .direct_tcpip_default(
                         SocketAddr::new("127.0.0.1".to_string(), 5000),
-                        SocketAddr::new(local_addr.ip().to_string(), local_addr.port() as u32),
+                        SocketAddr::new(local_addr.ip().to_string(), local_addr.port()),
                     )
                     .await
                     .unwrap();

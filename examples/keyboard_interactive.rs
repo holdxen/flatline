@@ -7,7 +7,8 @@ use tokio::io::stdin;
 use tokio::io::AsyncReadExt;
 use tokio::net::TcpStream;
 
-include!("./user.conf");
+mod common;
+use common::*;
 
 /// # add to /etc/ssh/sshd_config and restart ssh-server if you were using openssh
 /// KbdInteractiveAuthentication yes

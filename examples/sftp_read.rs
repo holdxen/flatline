@@ -6,7 +6,8 @@ use tokio::fs;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 
-include!("./user.conf");
+mod common;
+use common::*;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {

@@ -4,7 +4,8 @@ use flatline::session::Userauth;
 use tokio::fs;
 use tokio::net::TcpStream;
 
-include!("./user.conf");
+mod common;
+use common::*;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
