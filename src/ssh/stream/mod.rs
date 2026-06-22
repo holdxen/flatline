@@ -186,10 +186,13 @@ impl<T: AsyncRead + Unpin> BufferStream<T> {
     //     }
     // }
 
-    pub async fn read_line_crlf(&mut self) -> io::Result<Vec<u8>> {
+    pub async fn read_line_crlf(&mut self, max: usize) -> io::Result<Vec<u8>> {
         loop {
             // todo: improve performance
             for i in 0..self.r_buf.len() {
+                if i == max - 1 {
+                    return Err(io::Error::new(io::ErrorKind::Other, ""));
+                }
                 if self.r_buf[i] == b'\r' && i < self.r_buf.len() - 1 && self.r_buf[i + 1] == b'\n'
                 {
                     return Ok(self.r_buf.split_to(i + 2).to_vec());
@@ -337,8 +340,7 @@ where
         // let data = self.stream.read_exact(size as _).await?;
         let data = self.stream.fill(4 + size as usize).await?;
 
-        let pakcet = Packet::parse(&data[4..], None)
-            .ok_or(Error::invalid_format("Failed to parse packet"))?;
+        let pakcet = Packet::parse(&data[4..], None)?;
 
         self.stream.consume_read_buffer(4 + size as usize);
 

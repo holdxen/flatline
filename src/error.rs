@@ -1,10 +1,16 @@
 use std::{io, str::Utf8Error};
 
 use super::channel::ChannelOpenFailureReson;
+use crate::ssh::buffer;
 use openssl::error::ErrorStack;
 use tokio::sync::oneshot::error::RecvError;
 
 pub type Result<T> = std::result::Result<T, Error>;
+
+pub fn ok<T>(v: T) -> Result<T> {
+    Ok(v)
+}
+
 use snafu::Backtrace;
 use snafu::{IntoError, Snafu};
 
@@ -145,6 +151,9 @@ pub enum Error {
         backtrace: Backtrace,
         detail: String,
     },
+
+    #[snafu(transparent)]
+    FormatError { source: buffer::Error },
 }
 
 // struct Unexpect {

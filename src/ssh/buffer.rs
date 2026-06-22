@@ -4,6 +4,8 @@ use std::{
     ops::{Deref, Index, IndexMut},
 };
 
+use crate::error::{self, builder};
+
 macro_rules! match_type {
     (u8 $(,$i:expr)?) => {
         1
@@ -289,5 +291,199 @@ impl Buffer<Vec<u8>> {
 
     pub fn clear(&mut self) {
         self.0.clear();
+    }
+}
+
+#[derive(snafu::Snafu, Debug)]
+pub enum Error {
+    #[snafu(display("Unexpected end of buffer: {detail}"))]
+    UnexpectedEndOfBuffer { detail: String },
+}
+
+pub struct Producer {
+    data: Vec<u8>
+}
+
+impl Producer {
+    pub fn with_capacity(capacity: usize) -> Self {
+        Self {
+            data: Vec::with_capacity(capacity)
+        }
+    }
+
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.data
+    }
+
+    pub fn put_bytes(&mut self, bytes: impl AsRef<[u8]>) {
+        self.data.extend(bytes.as_ref());
+    }
+
+    pub fn put_u64(&mut self, num: u64) {
+        self.data.extend(num.to_be_bytes());
+    }
+
+    pub fn put_u32(&mut self, num: u32) {
+        self.data.extend(num.to_be_bytes());
+    }
+
+    pub fn put_u8(&mut self, num: u8) {
+        self.data.push(num);
+    }
+
+    pub fn into_vec(self) -> Vec<u8> {
+        self.data
+    }
+
+    pub fn put_one(&mut self, content: impl AsRef<[u8]>) {
+        self.put_u32(content.as_ref().len() as u32);
+
+        self.put_bytes(content);
+    }
+
+    pub fn len(&self) -> usize {
+        self.data.len()
+    }
+
+    pub fn extend<T: IntoIterator<Item = u8>>(&mut self, other: T) {
+        self.data.extend(other);
+    }
+}
+
+impl Default for Producer {
+    fn default() -> Self {
+        Self::with_capacity(1024)
+    }
+}
+
+
+
+pub struct Consumer<'a> {
+    data: &'a [u8],
+    pos: usize,
+}
+
+impl<'a> Consumer<'a> {
+    pub fn new(data: &'a [u8]) -> Self {
+        Self { data, pos: 0 }
+    }
+    pub fn peek(&self) -> &'a [u8] {
+        &self.data[self.pos..]
+    }
+
+    pub fn consume_all(&mut self) {
+        self.pos = self.data.len();
+    }
+
+    pub fn consume(&mut self, size: usize) {
+        self.pos += size;
+        assert!(self.pos <= self.data.len());
+    }
+
+    pub fn consume_u32(&mut self) -> Result<u32, Error> {
+        let u32_len = size_of::<u32>();
+        if self.peek().len() < u32_len {
+            // return builder::InvalidArgument {
+            //     tip: "Unexpected end of buffer while reading u32",
+            // }
+            // .fail();
+            return UnexpectedEndOfBufferSnafu {
+                detail: "Unexpected end of buffer while reading u32",
+            }
+            .fail();
+        }
+        let num = u32::from_be_bytes(self.peek()[..u32_len].try_into().unwrap());
+
+        println!("got num: {}, {:?}", num, self.peek());
+
+        self.consume(u32_len);
+
+        Ok(num)
+    }
+
+    pub fn consume_u64(&mut self) -> Result<u64, Error> {
+        let tmp = self.peek();
+        let u64_len = size_of::<u64>();
+        if tmp.len() < u64_len {
+            // return builder::InvalidArgument {
+            //     tip: "Unexpected end of buffer while reading u64",
+            // }
+            // .fail();
+            return UnexpectedEndOfBufferSnafu {
+                detail: "Unexpected end of buffer while reading u64",
+            }
+            .fail();
+        }
+        let ret = u64::from_be_bytes(tmp[..u64_len].try_into().unwrap());
+        self.consume(u64_len);
+
+        Ok(ret)
+    }
+
+    pub fn consume_one(&mut self) -> Result<&'a [u8], Error> {
+        let len = self.consume_u32()?;
+
+        if len as usize > self.peek().len() {
+            // return builder::InvalidArgument {
+            //     tip: "Unexpected end of buffer while reading one",
+            // }
+            // .fail();
+            return UnexpectedEndOfBufferSnafu {
+                detail: "Unexpected end of buffer while reading string",
+            }
+            .fail();
+        }
+
+        self.pos += len as usize;
+
+        Ok(&self.data[self.pos - len as usize..self.pos])
+    }
+
+    pub fn consume_bytes(&mut self, len: usize) -> Result<&'a [u8], Error> {
+        if self.peek().len() < len {
+            // return builder::InvalidArgument {
+            //     tip: "Unexpected end of buffer while reading bytes",
+            // }
+            // .fail();
+            return UnexpectedEndOfBufferSnafu {
+                detail: "Unexpected end of buffer while reading bytes",
+            }
+            .fail();
+        }
+        let ret = &self.peek()[..len];
+        self.consume(len);
+        Ok(ret)
+    }
+
+    pub fn peek_u8(&mut self) -> Result<u8, Error> {
+        if self.peek().is_empty() {
+            // return builder::InvalidArgument {
+            //     tip: "Unexpected end of buffer while reading u8",
+            // }
+            // .fail();
+            return UnexpectedEndOfBufferSnafu {
+                detail: "Unexpected end of buffer while reading u8",
+            }
+            .fail();
+        }
+
+        let ret = self.peek()[0];
+        Ok(ret)
+    }
+    pub fn consume_u8(&mut self) -> Result<u8, Error> {
+        if self.peek().is_empty() {
+            // return builder::InvalidArgument {
+            //     tip: "Unexpected end of buffer while reading u8",
+            // }
+            // .fail();
+            return UnexpectedEndOfBufferSnafu {
+                detail: "Unexpected end of buffer while reading u8",
+            }
+            .fail();
+        }
+
+        let ret = self.peek()[0];
+        self.consume(1);
+        Ok(ret)
     }
 }

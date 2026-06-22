@@ -13,13 +13,14 @@ use crate::cipher::crypt::{self, Decrypt, Encrypt};
 use crate::cipher::kex::{self, KeyExChange};
 use crate::cipher::mac::{self, Mac};
 use crate::cipher::sign::{self, Verify};
-use crate::error::builder;
+use crate::error::{self, builder};
 use crate::handshake::code::*;
 use crate::project;
-use crate::ssh::buffer::Buffer;
+use crate::ssh::buffer::{Buffer, Consumer, Producer};
 use derive_new::new;
 use indexmap::IndexMap;
 use openssl::rand::rand_bytes;
+use snafu::ResultExt;
 use tokio::io::{AsyncRead, AsyncWrite};
 
 pub struct Config<B> {
@@ -348,7 +349,7 @@ pub(crate) async fn banner_exchange<T: AsyncWrite + AsyncRead + Unpin>(
     let mut lines = vec![];
     const MAX: usize = 255;
     loop {
-        let line = stream.read_line_crlf().await?;
+        let line = stream.read_line_crlf(MAX - count).await?;
         snafu::ensure!(
             count <= MAX,
             builder::BannerTooLong {
@@ -481,55 +482,51 @@ pub(crate) async fn method_exchange<B: Behavior>(
 
     rand_bytes(&mut randbytes)?;
 
-    let mut buffer = Buffer::new();
-    buffer.put_u8(SSH_MSG_KEXINIT);
-    buffer.put_bytes(randbytes);
-    buffer.put_one(kex.join(","));
-    buffer.put_one(client_methods.host_key.join(","));
-    buffer.put_one(client_methods.en_client_to_server.join(","));
-    buffer.put_one(client_methods.en_server_to_client.join(","));
-    buffer.put_one(client_methods.mac_client_to_server.join(","));
-    buffer.put_one(client_methods.mac_server_to_client.join(","));
-    buffer.put_one(client_methods.com_client_to_server.join(","));
-    buffer.put_one(client_methods.com_server_to_client.join(","));
-    buffer.put_one(client_methods.lang_client_to_server.join(","));
-    buffer.put_one(client_methods.lang_server_to_client.join(","));
+    let mut producer = Producer::default();
+    producer.put_u8(SSH_MSG_KEXINIT);
+    producer.put_bytes(randbytes);
+    producer.put_one(kex.join(","));
+    producer.put_one(client_methods.host_key.join(","));
+    producer.put_one(client_methods.en_client_to_server.join(","));
+    producer.put_one(client_methods.en_server_to_client.join(","));
+    producer.put_one(client_methods.mac_client_to_server.join(","));
+    producer.put_one(client_methods.mac_server_to_client.join(","));
+    producer.put_one(client_methods.com_client_to_server.join(","));
+    producer.put_one(client_methods.com_server_to_client.join(","));
+    producer.put_one(client_methods.lang_client_to_server.join(","));
+    producer.put_one(client_methods.lang_server_to_client.join(","));
 
-    buffer.put_u8(0); // ssh.first_kex_packet_follows
-    buffer.put_bytes([0; 4]); // ssh.kex.reserved
+    producer.put_u8(0); // ssh.first_kex_packet_follows
+    producer.put_bytes([0; 4]); // ssh.kex.reserved
 
-    stream.send_payload(buffer.as_ref()).await?;
+    stream.send_payload(producer.as_bytes()).await?;
 
     let reply = stream.recv_packet().await?;
 
-    if reply.payload.is_empty() || reply.payload[0] != SSH_MSG_KEXINIT {
-        // return Err(Error::ProtocolError(
-        //     "Failed to receive kex msg".to_string(),
-        // ));
-        return builder::Protocol {
-            tip: "Failed to receive kex msg",
+    {
+        let mut consumer = Consumer::new(&reply.payload);
+
+        if consumer.consume_u8()? != SSH_MSG_KEXINIT {
+            return builder::Protocol {
+                tip: "Invalid response from server"
+            }.fail();
         }
-        .fail();
-    }
 
-    let parser = || {
-        let reply = Buffer::from_slice(&reply.payload);
+        consumer.consume_bytes(16)?; // random bytes
 
-        reply.take_u8()?;
+        let mut get = || {
+            let methods = consumer.consume_one()?;
 
-        reply.take_bytes(16)?;
+            let methods = std::str::from_utf8(methods).context(builder::Utf8)?;
 
-        let get = || {
-            let (_, methods) = reply.take_one()?;
-            let methods = std::str::from_utf8(methods).ok()?;
-
-            Some(
+            error::ok(
                 methods
                     .split(',')
                     .map(|v| v.to_string())
                     .collect::<Vec<String>>(),
             )
         };
+
         let mut kex = get()?;
 
         let mut kex_strict = false;
@@ -544,7 +541,7 @@ pub(crate) async fn method_exchange<B: Behavior>(
             ext = true;
         };
 
-        let methods = Methods::new(
+        let server_methods = Methods::new(
             kex,
             get()?,
             get()?,
@@ -559,18 +556,86 @@ pub(crate) async fn method_exchange<B: Behavior>(
             ext,
         );
 
-        let _ = reply.take_u8()?;
-        let _ = reply.take_bytes(4)?;
 
-        Some(methods)
-    };
+        consumer.consume_u8()?;
+        consumer.consume_bytes(4)?;
 
-    let server_methods = parser().ok_or(Error::invalid_format("Invalid packet"))?;
 
-    let client = Summary::new(buffer.into_vec(), client_methods);
-    let server = Summary::new(reply.payload, server_methods);
+        let client = Summary::new(producer.into_vec(), client_methods);
+        let server = Summary::new(reply.payload, server_methods);
 
-    Ok(MethodExchange::new(client, server))
+        Ok(MethodExchange::new(client, server))
+
+    }
+
+    // if reply.payload.is_empty() || reply.payload[0] != SSH_MSG_KEXINIT {
+    //     return builder::Protocol {
+    //         tip: "Failed to receive kex msg",
+    //     }
+    //     .fail();
+    // }
+
+    // let parser = || {
+    //     let reply = Buffer::from_slice(&reply.payload);
+
+    //     reply.take_u8()?;
+
+    //     reply.take_bytes(16)?;
+
+    //     let get = || {
+    //         let (_, methods) = reply.take_one()?;
+    //         let methods = std::str::from_utf8(methods).ok()?;
+
+    //         Some(
+    //             methods
+    //                 .split(',')
+    //                 .map(|v| v.to_string())
+    //                 .collect::<Vec<String>>(),
+    //         )
+    //     };
+    //     let mut kex = get()?;
+
+    //     let mut kex_strict = false;
+    //     let mut ext = false;
+    //     if let Some(index) = kex.iter().position(|v| v == KEX_STRICT_SERVER) {
+    //         kex.remove(index);
+    //         kex_strict = true;
+    //     };
+
+    //     if let Some(index) = kex.iter().position(|v| v == EXT_INFO_SERVER) {
+    //         kex.remove(index);
+    //         ext = true;
+    //     };
+
+    //     let methods = Methods::new(
+    //         kex,
+    //         get()?,
+    //         get()?,
+    //         get()?,
+    //         get()?,
+    //         get()?,
+    //         get()?,
+    //         get()?,
+    //         get()?,
+    //         get()?,
+    //         kex_strict,
+    //         ext,
+    //     );
+
+    //     let _ = reply.take_u8()?;
+    //     let _ = reply.take_bytes(4)?;
+
+    //     Some(methods)
+    // };
+
+    // let server_methods = parser().ok_or(Error::invalid_format("Invalid packet"))?;
+
+    // let client = Summary::new(producer.into_vec(), client_methods);
+    // let server = Summary::new(reply.payload, server_methods);
+
+    // Ok(MethodExchange::new(client, server))
+
+    // todo!()
 }
 
 pub(crate) async fn method_exchange_with_payload<B: Behavior>(
