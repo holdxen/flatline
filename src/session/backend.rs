@@ -4,14 +4,17 @@ use std::collections::HashMap;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::{mpsc, oneshot};
 
-use crate::cipher::signature::Signature;
+use crate::DEFAULT_CHANNEL_CAPACITY;
 use crate::cipher::Factory;
-use crate::error::{builder, Error};
+use crate::cipher::signature::Signature;
+use crate::error::{Error, builder};
 use crate::session::channel::{IdentityPair, TtyOpcode};
-use crate::session::{forward, KeyboardInteractive, Notifier, RequestFailureSnafu, UnexpectedBehaviourSnafu, UnexpectedSendingError};
+use crate::session::{
+    KeyboardInteractive, Notifier, RequestFailureSnafu, UnexpectedBehaviourSnafu,
+    UnexpectedSendingError, forward,
+};
 use crate::ssh::buffer::Consumer;
 use crate::ssh::msg::{Message, Signal};
-use crate::DEFAULT_CHANNEL_CAPACITY;
 use crate::{
     error,
     session::channel,
@@ -24,7 +27,6 @@ use crate::{
     },
 };
 
-
 struct ListenerHandle {
     sender: mpsc::Sender<(forward::Stream, forward::SocketAddr)>,
     initial_window_size: u32,
@@ -32,7 +34,11 @@ struct ListenerHandle {
 }
 
 impl ListenerHandle {
-    fn new(sender: mpsc::Sender<(forward::Stream, forward::SocketAddr)>, initial_window_size: u32, maximum_packet_size: u32) -> Self {
+    fn new(
+        sender: mpsc::Sender<(forward::Stream, forward::SocketAddr)>,
+        initial_window_size: u32,
+        maximum_packet_size: u32,
+    ) -> Self {
         Self {
             sender,
             initial_window_size,
@@ -85,7 +91,7 @@ where
     server_ping_supported: bool,
     forward: HashMap<forward::SocketAddr, ListenerHandle>,
     frontend: mpsc::WeakSender<Event>,
-    notifier: N
+    notifier: N,
 }
 
 #[easy_ext::ext]
@@ -103,6 +109,17 @@ where
                 u8: SSH_MSG_CHANNEL_WINDOW_ADJUST,
                 u32: server_id,
                 u32: count
+            );
+            self.send_payload(&buffer[..]).await?;
+            Ok(())
+        }
+    }
+
+    fn send_channel_close(&mut self, server_id: u32) -> impl Future<Output = error::Result<()>> {
+        async move {
+            let buffer = make_buffer_without_header!(
+                u8: SSH_MSG_CHANNEL_CLOSE,
+                u32: server_id
             );
             self.send_payload(&buffer[..]).await?;
             Ok(())
@@ -162,16 +179,14 @@ where
             Message::ExtInfo { extensions } => {
                 if let Some(methods) = extensions.get("server-sig-algs") {
                     let method = match std::str::from_utf8(methods) {
-                        Ok(method) => {
-                            method
-                        }
+                        Ok(method) => method,
                         Err(_) => {
                             tracing::warn!("Invalid server-sig-algs value from server");
                             return Ok(());
                         }
                     };
 
-                   self.server_algorithms = method.split(',').map(|s| s.to_string()).collect();
+                    self.server_algorithms = method.split(',').map(|s| s.to_string()).collect();
                 }
                 if let Some(v) = extensions.get("ping@openssh.com") {
                     if v == b"0" {
@@ -179,9 +194,8 @@ where
                     }
                 }
                 tracing::info!("Extensions: {:?}", extensions);
-            },
-            Message::Ignore { .. } => {
             }
+            Message::Ignore { .. } => {}
             Message::ServiceAccept { .. } => {
                 handled = false;
             }
@@ -204,8 +218,7 @@ where
                 .build()
                 .into());
             }
-            Message::Unimplemented { .. } => {
-            }
+            Message::Unimplemented { .. } => {}
             Message::AuthenticationBanner { message, language } => {
                 tracing::info!(
                     "UserAuthenticationBanner: message={}, language={}",
@@ -266,16 +279,42 @@ where
                 recipient_channel,
                 count,
             } => {
-                self.handle_channel_window_adjust(recipient_channel, count).await?;
+                self.handle_channel_window_adjust(recipient_channel, count)
+                    .await?;
             }
-            Message::ChannelFlowControl { recipient_channel, want_reply, on } => {
-                self.handle_channel_flow_control(recipient_channel, want_reply, on).await?;
+            Message::ChannelFlowControl {
+                recipient_channel,
+                want_reply,
+                on,
+            } => {
+                self.handle_channel_flow_control(recipient_channel, want_reply, on)
+                    .await?;
             }
-            Message::ChannelExitStatus { recipient_channel, want_reply, exit_status } => {
-                self.handle_channel_exit_status(recipient_channel, want_reply, exit_status).await?;
+            Message::ChannelExitStatus {
+                recipient_channel,
+                want_reply,
+                exit_status,
+            } => {
+                self.handle_channel_exit_status(recipient_channel, want_reply, exit_status)
+                    .await?;
             }
-            Message::ChannelExitSignal { recipient_channel, want_reply, signal, core_dumped, error_message, language } => {
-                self.handle_channel_exit_signal(recipient_channel, want_reply, signal, core_dumped, error_message, language).await?;
+            Message::ChannelExitSignal {
+                recipient_channel,
+                want_reply,
+                signal,
+                core_dumped,
+                error_message,
+                language,
+            } => {
+                self.handle_channel_exit_signal(
+                    recipient_channel,
+                    want_reply,
+                    signal,
+                    core_dumped,
+                    error_message,
+                    language,
+                )
+                .await?;
             }
             Message::ChannelClose { recipient_channel } => {
                 self.handle_channel_close(recipient_channel).await?;
@@ -283,18 +322,42 @@ where
             Message::ChannelEof { recipient_channel } => {
                 self.handle_channel_eof(recipient_channel).await?;
             }
-            Message::ChannelUnknownRequest { recipient_channel, r#type, want_reply } => {
-                self.handle_channel_unknown_request(recipient_channel, want_reply, r#type).await?;
+            Message::ChannelUnknownRequest {
+                recipient_channel,
+                r#type,
+                want_reply,
+            } => {
+                self.handle_channel_unknown_request(recipient_channel, want_reply, r#type)
+                    .await?;
             }
             Message::GlobalRequestKeepAliveOpenSSH { want_reply } => {
-                self.handle_global_request_keep_alive_openssh(want_reply).await?;
+                self.handle_global_request_keep_alive_openssh(want_reply)
+                    .await?;
             }
             Message::GlobalRequestHostKeysOpenSSH { .. } => {}
             Message::GlobalUnknownRequest { want_reply, r#type } => {
-                self.handle_global_unknown_request(want_reply, r#type).await?;
+                self.handle_global_unknown_request(want_reply, r#type)
+                    .await?;
             }
-            Message::ChannelOpenForwardedTcpIp { sender_channel, initial_window_size, maximum_packet_size, connected_address, connected_port, originator_address, originator_port } => {
-                self.handle_forwarded_tcp_ip(sender_channel, initial_window_size, maximum_packet_size, connected_address, connected_port, originator_address, originator_port).await?;
+            Message::ChannelOpenForwardedTcpIp {
+                sender_channel,
+                initial_window_size,
+                maximum_packet_size,
+                connected_address,
+                connected_port,
+                originator_address,
+                originator_port,
+            } => {
+                self.handle_forwarded_tcp_ip(
+                    sender_channel,
+                    initial_window_size,
+                    maximum_packet_size,
+                    connected_address,
+                    connected_port,
+                    originator_address,
+                    originator_port,
+                )
+                .await?;
             }
             Message::ChannelOpenAgentConnect { .. } => {}
             Message::ChannelOpenUnknown { .. } => {}
@@ -307,11 +370,12 @@ where
         Ok(())
     }
 
-    async fn authenticate_keyboard_interactive(&mut self,
-                                               username: &str,
-                                               mut interactive: Box<dyn KeyboardInteractive>,
-                                               methods: &[super::InteractiveMethod]) -> error::Result<super::AuthenticateResult> {
-
+    async fn authenticate_keyboard_interactive(
+        &mut self,
+        username: &str,
+        mut interactive: Box<dyn KeyboardInteractive>,
+        methods: &[super::InteractiveMethod],
+    ) -> error::Result<super::AuthenticateResult> {
         let buffer = make_buffer_without_header! {
             u8: SSH_MSG_USERAUTH_REQUEST,
             one: username,
@@ -323,28 +387,35 @@ where
 
         self.socket.send_payload(&buffer[..]).await?;
 
-
         loop {
             let packet = self.socket.recv_packet().await?;
             let msg = Message::parse(&packet.payload)?;
             match msg {
                 Message::AuthenticationSuccess => {
                     self.socket.authenticated = true;
-                    break Ok(super::AuthenticateResult::Success)
+                    break Ok(super::AuthenticateResult::Success);
                 }
-                Message::AuthenticationFailure { partial_success, allow_methods } => {
+                Message::AuthenticationFailure {
+                    partial_success,
+                    allow_methods,
+                } => {
                     break Ok(super::AuthenticateResult::Failure {
                         partial_success,
                         allow_methods: allow_methods.into_iter().map(|m| m.to_string()).collect(),
-                    })
+                    });
                 }
-                Message::UnrecognizedMessage { code: SSH_MSG_USERAUTH_INFO_REQUEST, data } => { // let mut response = async || {
+                Message::UnrecognizedMessage {
+                    code: SSH_MSG_USERAUTH_INFO_REQUEST,
+                    data,
+                } => {
+                    // let mut response = async || {
                     let mut consumer = Consumer::new(data);
                     let name = consumer.consume_one()?;
                     let name = std::str::from_utf8(name).context(msg::ExpectStringSnafu)?;
 
                     let instruction = consumer.consume_one()?;
-                    let instruction = std::str::from_utf8(instruction).context(msg::ExpectStringSnafu)?;
+                    let instruction =
+                        std::str::from_utf8(instruction).context(msg::ExpectStringSnafu)?;
 
                     let _lang = consumer.consume_one()?;
                     let size = consumer.consume_u32()?;
@@ -353,20 +424,20 @@ where
 
                     for _ in 0..size {
                         let content = consumer.consume_one()?;
-                        let content = std::str::from_utf8(content).context(msg::ExpectStringSnafu)?;
+                        let content =
+                            std::str::from_utf8(content).context(msg::ExpectStringSnafu)?;
                         let echo = consumer.consume_u8()? != 0;
-                        prompts.push(super::Prompt {
-                            content,
-                            echo
-                        })
+                        prompts.push(super::Prompt { content, echo })
                     }
 
                     let responses = interactive.interactive(name, instruction, &prompts).await?;
 
-
-                    snafu::ensure!(responses.len() == prompts.len(), builder::InvalidOperation {
-                        detail: "Invalid response"
-                    });
+                    snafu::ensure!(
+                        responses.len() == prompts.len(),
+                        builder::InvalidOperation {
+                            detail: "Invalid response"
+                        }
+                    );
 
                     let mut buffer = make_buffer_without_header! {
                         u8: SSH_MSG_USERAUTH_INFO_RESPONSE,
@@ -377,10 +448,7 @@ where
                         buffer.put_one(i)
                     }
 
-
-
                     self.socket.send_payload(&buffer[..]).await?;
-
                 }
                 _ => {
                     self.handle_msg(msg).await?;
@@ -388,7 +456,6 @@ where
             }
         }
     }
-
 
     // async fn channel_upgrade_sftp(&mut self, id: IdentityPair) -> error::Result<()> {
     //     self.channel_request_subsystem(id, true, "sftp").await?;
@@ -458,12 +525,39 @@ where
     //     }
     // }
 
-    pub async fn channel_open_sftp(&mut self, initial_window_size: u32, maximum_packet_size: u32) -> error::Result<channel::Channel> {
+    pub async fn channel_clean(&mut self) -> error::Result<()> {
+        let len = self.channels.len();
+        for i in (0..len).rev() {
+            let channel = &mut self.channels[i];
+            if channel.sender.is_closed() {
+                if !channel.client.closed {
+                    tracing::info!(
+                        "Clean closed channel client={}, server={}",
+                        channel.client.id,
+                        channel.server.id
+                    );
+                    self.socket.send_channel_close(channel.server.id).await?;
+                    channel.client.closed = true;
+                }
+                if channel.server.closed {
+                    self.channels.remove(i);
+                }
+            }
+        }
 
+        Ok(())
+    }
 
+    pub async fn channel_open_sftp(
+        &mut self,
+        initial_window_size: u32,
+        maximum_packet_size: u32,
+    ) -> error::Result<channel::Channel> {
         tracing::info!("Waiting -1");
 
-        let channel = self.channel_open_session(initial_window_size, maximum_packet_size).await?;
+        let channel = self
+            .channel_open_session(initial_window_size, maximum_packet_size)
+            .await?;
 
         let id = channel.identity();
 
@@ -476,8 +570,12 @@ where
         Ok(channel)
     }
 
-    pub async fn channel_request_subsystem(&mut self, id: IdentityPair, want_reply: bool, subsystem: &str) -> error::Result<()> {
-
+    pub async fn channel_request_subsystem(
+        &mut self,
+        id: IdentityPair,
+        want_reply: bool,
+        subsystem: &str,
+    ) -> error::Result<()> {
         let buffer = make_buffer_without_header! {
             u8: SSH_MSG_CHANNEL_REQUEST,
             u32: id.server,
@@ -486,22 +584,24 @@ where
             one: subsystem,
         };
 
-
         self.socket.send_payload(&buffer[..]).await?;
 
         self.wait_for_channel_response(want_reply, id).await
-
-
     }
 
     fn upgrade_frontend(&self) -> error::Result<mpsc::Sender<Event>> {
         let sender = self.frontend.upgrade().context(UnexpectedBehaviourSnafu {
-            detail: "Maybe session should be shutdown"
+            detail: "Maybe session should be shutdown",
         })?;
         Ok(sender)
     }
 
-    async fn global_request_tcp_ip_forward(&mut self, mut addr: forward::SocketAddr, initial_window_size: u32, maximum_packet_size: u32) -> error::Result<forward::Listener> {
+    async fn global_request_tcp_ip_forward(
+        &mut self,
+        mut addr: forward::SocketAddr,
+        initial_window_size: u32,
+        maximum_packet_size: u32,
+    ) -> error::Result<forward::Listener> {
         let buffer = make_buffer_without_header! {
             u8: SSH_MSG_GLOBAL_REQUEST,
             one: SSH_GLOBAL_REQUEST_TYPE_TCP_IP_FORWARD,
@@ -527,7 +627,10 @@ where
 
                 let listener = forward::Listener::new(receiver, frontend, addr.clone());
 
-                self.forward.insert(addr, ListenerHandle::new(sender, initial_window_size, maximum_packet_size));
+                self.forward.insert(
+                    addr,
+                    ListenerHandle::new(sender, initial_window_size, maximum_packet_size),
+                );
 
                 return Ok(listener);
             } else if packet.payload[0] == SSH_MSG_REQUEST_FAILURE {
@@ -539,8 +642,10 @@ where
         }
     }
 
-    async fn handle_global_request_keep_alive_openssh(&mut self, want_reply: bool) -> error::Result<()> {
-
+    async fn handle_global_request_keep_alive_openssh(
+        &mut self,
+        want_reply: bool,
+    ) -> error::Result<()> {
         if want_reply {
             self.socket.send_payload(&[SSH_MSG_REQUEST_SUCCESS]).await?;
         }
@@ -548,13 +653,19 @@ where
         Ok(())
     }
 
-    async fn handle_global_request_host_keys_openssh(&mut self, want_reply: bool, host_keys: &[&[u8]]) -> error::Result<()> {
-
+    async fn handle_global_request_host_keys_openssh(
+        &mut self,
+        want_reply: bool,
+        host_keys: &[&[u8]],
+    ) -> error::Result<()> {
         todo!()
     }
 
-    async fn handle_global_unknown_request(&mut self, want_reply: bool, r#type: &str) -> error::Result<()> {
-
+    async fn handle_global_unknown_request(
+        &mut self,
+        want_reply: bool,
+        r#type: &str,
+    ) -> error::Result<()> {
         tracing::info!("Global unknown request: {}", r#type);
 
         if want_reply {
@@ -564,12 +675,18 @@ where
         Ok(())
     }
 
-    async fn handle_channel_unknown_request(&mut self, recipient_channel: u32, want_reply: bool, r#type: &str) -> error::Result<()> {
-
-
+    async fn handle_channel_unknown_request(
+        &mut self,
+        recipient_channel: u32,
+        want_reply: bool,
+        r#type: &str,
+    ) -> error::Result<()> {
         tracing::warn!("Unknown channel request: {}", r#type);
 
-        let channel = self.channels.iter().find(|v| v.client.id == recipient_channel);
+        let channel = self
+            .channels
+            .iter()
+            .find(|v| v.client.id == recipient_channel);
 
         let Some(channel) = channel else {
             tracing::warn!("Received unexpected channel: {:?}", recipient_channel);
@@ -588,8 +705,15 @@ where
         Ok(())
     }
 
-    async fn handle_channel_exit_signal(&mut self, recipient_channel: u32, want_reply: bool, signal: &str, core_dumped: bool, error_message: &str, language: &str) -> error::Result<()> {
-
+    async fn handle_channel_exit_signal(
+        &mut self,
+        recipient_channel: u32,
+        want_reply: bool,
+        signal: &str,
+        core_dumped: bool,
+        error_message: &str,
+        language: &str,
+    ) -> error::Result<()> {
         if want_reply {
             tracing::warn!("want_reply should be false");
         }
@@ -597,7 +721,10 @@ where
             tracing::warn!("language should be empty: {}", language);
         }
 
-        let channel = self.channels.iter().find(|v| v.client.id == recipient_channel);
+        let channel = self
+            .channels
+            .iter()
+            .find(|v| v.client.id == recipient_channel);
 
         let Some(channel) = channel else {
             tracing::warn!("Received unexpected channel: {:?}", recipient_channel);
@@ -615,32 +742,48 @@ where
         }
 
         Ok(())
-
     }
 
-    async fn handle_channel_exit_status(&mut self, recipient_channel: u32, want_reply: bool, exit_status: u32) -> error::Result<()> {
-
+    async fn handle_channel_exit_status(
+        &mut self,
+        recipient_channel: u32,
+        want_reply: bool,
+        exit_status: u32,
+    ) -> error::Result<()> {
         if want_reply {
             tracing::warn!("want_reply should be false");
         }
 
-        let channel = self.channels.iter().find(|v| v.client.id == recipient_channel);
+        let channel = self
+            .channels
+            .iter()
+            .find(|v| v.client.id == recipient_channel);
 
         let Some(channel) = channel else {
             tracing::warn!("Received unexpected channel: {:?}", recipient_channel);
             return Ok(());
         };
 
-
-        if let Err(_) = channel.sender.send(channel::Message::Exit(channel::ExitStatus::Normal(exit_status))).await {
+        if let Err(_) = channel
+            .sender
+            .send(channel::Message::Exit(channel::ExitStatus::Normal(
+                exit_status,
+            )))
+            .await
+        {
             tracing::error!("Failed to send exit status");
         }
         Ok(())
     }
 
-
-    async fn channel_request_window_change(&mut self, id: IdentityPair, columns: u32, rows: u32, width: u32, height: u32) -> error::Result<()> {
-
+    async fn channel_request_window_change(
+        &mut self,
+        id: IdentityPair,
+        columns: u32,
+        rows: u32,
+        width: u32,
+        height: u32,
+    ) -> error::Result<()> {
         let buffer = make_buffer_without_header! {
             u8: SSH_MSG_CHANNEL_REQUEST,
             u32: id.server,
@@ -655,8 +798,16 @@ where
         self.socket.send_payload(&buffer[..]).await
     }
 
-    async fn handle_channel_flow_control(&mut self, recipient_channel: u32, want_reply: bool, on: bool) -> error::Result<()> {
-        let channel = self.channels.iter().find(|v| v.client.id == recipient_channel);
+    async fn handle_channel_flow_control(
+        &mut self,
+        recipient_channel: u32,
+        want_reply: bool,
+        on: bool,
+    ) -> error::Result<()> {
+        let channel = self
+            .channels
+            .iter()
+            .find(|v| v.client.id == recipient_channel);
         let Some(channel) = channel else {
             tracing::error!("Channel not found");
             return Ok(());
@@ -666,17 +817,22 @@ where
             tracing::warn!("want_reply should be false");
         }
 
-        if let Err(_) = channel.sender.send(channel::Message::FlowControl{
-            on
-        }).await {
+        if let Err(_) = channel
+            .sender
+            .send(channel::Message::FlowControl { on })
+            .await
+        {
             tracing::error!("Failed to send message");
         }
-
 
         Ok(())
     }
 
-    async fn handle_channel_window_adjust(&mut self, client_id: u32, count: u32) -> error::Result<()> {
+    async fn handle_channel_window_adjust(
+        &mut self,
+        client_id: u32,
+        count: u32,
+    ) -> error::Result<()> {
         let Some(channel) = self.channels.iter_mut().find(|c| c.client.id == client_id) else {
             tracing::error!("Channel not found");
             return Ok(());
@@ -684,18 +840,18 @@ where
 
         channel.server.used_window_size -= count as i64;
 
-        if let Err(e) = channel.sender.send(channel::Message::WindowChange {size: count}).await {
+        if let Err(e) = channel
+            .sender
+            .send(channel::Message::WindowChange { size: count })
+            .await
+        {
             tracing::error!("Failed to send window change: {}", e);
         }
 
         Ok(())
     }
 
-    async fn channel_send(
-        &mut self,
-        id: IdentityPair,
-        data: &[u8],
-    ) -> error::Result<usize> {
+    async fn channel_send(&mut self, id: IdentityPair, data: &[u8]) -> error::Result<usize> {
         let Some(channel) = self.channels.iter_mut().find(|c| c.server.id == id.server) else {
             return Err(builder::InvalidOperation {
                 detail: format!("Channel({}) not found", id.server),
@@ -707,7 +863,9 @@ where
         let mut sent = 0;
 
         while sent != data.len() && channel.server.left() != 0 {
-            let size = (data.len() - sent).min(MAX_PACKET_PAYLOAD_LENGTH - 4 - 1).min(channel.server.left() as usize);
+            let size = (data.len() - sent)
+                .min(MAX_PACKET_PAYLOAD_LENGTH - 4 - 1)
+                .min(channel.server.left() as usize);
             let buffer = make_buffer_without_header!(
                 u8: SSH_MSG_CHANNEL_DATA,
                 u32: id.server,
@@ -718,7 +876,6 @@ where
             channel.server.used_window_size += size as i64;
             sent += size;
         }
-
 
         // let size = data.len().min(channel.server.left() as usize);
         //
@@ -831,11 +988,24 @@ where
                 back.send_tracing(result);
             }
             Event::AuthenticatePublicKey {
-                username, method, is_certificate, public_blob, private_blob, back
+                username,
+                method,
+                is_certificate,
+                public_blob,
+                private_blob,
+                back,
             } => {
-               let result = self.authenticate_public_key(&username, &method, is_certificate, &public_blob, &private_blob).await;
+                let result = self
+                    .authenticate_public_key(
+                        &username,
+                        &method,
+                        is_certificate,
+                        &public_blob,
+                        &private_blob,
+                    )
+                    .await;
                 back.send_tracing(result);
-            },
+            }
             Event::RequestAuthentication { back } => {
                 let result = self.request_authentication().await;
                 back.send_tracing(result);
@@ -885,9 +1055,16 @@ where
                 maximum_packet_size,
                 back,
             } => {
-                let result = self.channel_open_direct_tcp_ip(initial_window_size, maximum_packet_size, target, source).await;
+                let result = self
+                    .channel_open_direct_tcp_ip(
+                        initial_window_size,
+                        maximum_packet_size,
+                        target,
+                        source,
+                    )
+                    .await;
                 back.send_tracing(result);
-            },
+            }
             Event::ChannelOpenForwardTcpIp {
                 channel_id,
                 host,
@@ -922,20 +1099,47 @@ where
                 let result = self.channel_request_shell(channel_id, want_reply).await;
                 back.send_tracing(result);
             }
-            Event::ChannelRequestAgent { channel_id, want_reply, back } => {
+            Event::ChannelRequestAgent {
+                channel_id,
+                want_reply,
+                back,
+            } => {
                 let result = self.channel_request_agent(channel_id, want_reply).await;
                 back.send_tracing(result);
             }
-            Event::ChannelRequestExec { channel_id, want_reply, command, back } => {
-                let result = self.channel_request_exec(channel_id, want_reply, &command).await;
+            Event::ChannelRequestExec {
+                channel_id,
+                want_reply,
+                command,
+                back,
+            } => {
+                let result = self
+                    .channel_request_exec(channel_id, want_reply, &command)
+                    .await;
                 back.send_tracing(result);
             }
-            Event::ChannelRequestWindowChange { channel_id, columns, rows, width, height, back } => {
-                let result = self.channel_request_window_change(channel_id, columns, rows, width, height).await;
+            Event::ChannelRequestWindowChange {
+                channel_id,
+                columns,
+                rows,
+                width,
+                height,
+                back,
+            } => {
+                let result = self
+                    .channel_request_window_change(channel_id, columns, rows, width, height)
+                    .await;
                 back.send_tracing(result);
             }
-            Event::GlobalRequestTcpIPForward { addr, initial_window_size, maximum_packet_size, back } => {
-                let result = self.global_request_tcp_ip_forward(addr, initial_window_size, maximum_packet_size).await;
+            Event::GlobalRequestTcpIPForward {
+                addr,
+                initial_window_size,
+                maximum_packet_size,
+                back,
+            } => {
+                let result = self
+                    .global_request_tcp_ip_forward(addr, initial_window_size, maximum_packet_size)
+                    .await;
                 back.send_tracing(result);
             }
             Event::ChannelClose { channel_id, back } => {
@@ -946,36 +1150,66 @@ where
                 let result = self.channel_eof(channel_id).await;
                 back.send_tracing(result);
             }
-            Event::GlobalRequestCancelTcpIpForward { want_reply, addr, back } => {}
-            Event::AuthenticateKeyboardInteractive { username, interactive, methods, back } => {
-                let result = self.authenticate_keyboard_interactive(&username, interactive, &methods).await;
+            Event::GlobalRequestCancelTcpIpForward {
+                want_reply,
+                addr,
+                back,
+            } => {}
+            Event::AuthenticateKeyboardInteractive {
+                username,
+                interactive,
+                methods,
+                back,
+            } => {
+                let result = self
+                    .authenticate_keyboard_interactive(&username, interactive, &methods)
+                    .await;
                 back.send_tracing(result);
             }
-            Event::ChannelOpenSFTP { initial_window_size, maximum_packet_size, back } => {
-                let result = self.channel_open_sftp(initial_window_size, maximum_packet_size).await;
+            Event::ChannelOpenSFTP {
+                initial_window_size,
+                maximum_packet_size,
+                back,
+            } => {
+                let result = self
+                    .channel_open_sftp(initial_window_size, maximum_packet_size)
+                    .await;
+                back.send_tracing(result);
+            }
+            Event::ChannelClean { back } => {
+                let result = self.channel_clean().await;
                 back.send_tracing(result);
             }
         }
         Ok(())
     }
 
-    async fn handle_forwarded_tcp_ip(&mut self,
-                                     sender_channel: u32,
-                                     initial_window_size: u32,
-                                     maximum_packet_size: u32,
-                                     connected_address: &str,
-                                     connected_port: u32,
-                                     originator_address: &str,
-                                     originator_port: u32,
+    async fn handle_forwarded_tcp_ip(
+        &mut self,
+        sender_channel: u32,
+        initial_window_size: u32,
+        maximum_packet_size: u32,
+        connected_address: &str,
+        connected_port: u32,
+        originator_address: &str,
+        originator_port: u32,
     ) -> error::Result<()> {
-
         let verify = || {
-            let connected_port = u16::try_from(connected_port).ok().context(super::InvalidPortSnafu)?;
-            let originator_port = u16::try_from(originator_port).ok().context(super::InvalidPortSnafu)?;
-            let Some(listener) = self.forward.get(&forward::SocketAddr::new(connected_address.to_string(), connected_port)) else {
+            let connected_port = u16::try_from(connected_port)
+                .ok()
+                .context(super::InvalidPortSnafu)?;
+            let originator_port = u16::try_from(originator_port)
+                .ok()
+                .context(super::InvalidPortSnafu)?;
+            let Some(listener) = self.forward.get(&forward::SocketAddr::new(
+                connected_address.to_string(),
+                connected_port,
+            )) else {
                 return Err(super::UnexpectedMessageSnafu {
-                    detail: "No such forward listener"
-                }.build().into());
+                    detail: "No such forward listener",
+                }
+                .build()
+                .into());
             };
 
             error::ok((listener, originator_port, connected_port))
@@ -996,10 +1230,9 @@ where
 
                 self.socket.send_payload(&buffer[..]).await?;
 
-                return Ok(())
+                return Ok(());
             }
         };
-
 
         let id = IdentityPair::new(self.next_channel_id(), sender_channel);
 
@@ -1011,11 +1244,9 @@ where
             u32: listener.maximum_packet_size,
         };
 
-
         self.socket.send_payload(&buffer[..]).await?;
 
         let (sender, receiver) = mpsc::channel(DEFAULT_CHANNEL_CAPACITY);
-
 
         let handle = ChannelHandle {
             client: ChannelEndpoint {
@@ -1041,8 +1272,14 @@ where
 
         let channel = channel::Channel::new(id, receiver, self.upgrade_frontend()?);
 
-
-        if let Err(_) = listener.sender.send((forward::Stream::new(channel), forward::SocketAddr::new(originator_address.to_string(), originator_port))).await {
+        if let Err(_) = listener
+            .sender
+            .send((
+                forward::Stream::new(channel),
+                forward::SocketAddr::new(originator_address.to_string(), originator_port),
+            ))
+            .await
+        {
             tracing::info!("Failed to send forward stream, try to close stream now");
             self.channel_close(id).await?;
         }
@@ -1050,9 +1287,17 @@ where
         Ok(())
     }
 
-    async fn global_request_cancel_tcp_ip_forward(&mut self, want_reply: bool, address: String, port: u16) -> error::Result<()> {
-
-        if self.forward.remove(&forward::SocketAddr::new(address.clone(), port)).is_none() {
+    async fn global_request_cancel_tcp_ip_forward(
+        &mut self,
+        want_reply: bool,
+        address: String,
+        port: u16,
+    ) -> error::Result<()> {
+        if self
+            .forward
+            .remove(&forward::SocketAddr::new(address.clone(), port))
+            .is_none()
+        {
             tracing::warn!("Maybe forward listener not exists")
         }
 
@@ -1068,27 +1313,28 @@ where
         if want_reply {
             self.match_msg(|msg| {
                 Some(match msg {
-                    Message::RequestSuccess => {
-                        Ok(())
-                    }
-                    Message::RequestFailure => {
-                        Err(RequestFailureSnafu.build().into())
-                    }
+                    Message::RequestSuccess => Ok(()),
+                    Message::RequestFailure => Err(RequestFailureSnafu.build().into()),
                     _ => return None,
                 })
-            }).await?;
+            })
+            .await?;
         }
         Ok(())
     }
     async fn channel_eof(&mut self, id: IdentityPair) -> error::Result<()> {
-        let index = self.channels.iter_mut().position(|v| v.client.id == id.client);
+        let index = self
+            .channels
+            .iter_mut()
+            .position(|v| v.client.id == id.client);
         let Some(index) = index else {
             tracing::error!("Channel not found");
             return Err(UnexpectedBehaviourSnafu {
-                detail: "No such channel"
-            }.build().into());
+                detail: "No such channel",
+            }
+            .build()
+            .into());
         };
-
 
         let buffer = make_buffer_without_header! {
             u8: SSH_MSG_CHANNEL_EOF,
@@ -1097,7 +1343,6 @@ where
 
         self.socket.send_payload(&buffer[..]).await?;
 
-
         let channel = &mut self.channels[index];
 
         channel.client.eof = true;
@@ -1105,25 +1350,29 @@ where
         Ok(())
     }
     async fn channel_close(&mut self, id: IdentityPair) -> error::Result<()> {
-        let index = self.channels.iter_mut().position(|v| v.client.id == id.client);
+        let index = self
+            .channels
+            .iter_mut()
+            .position(|v| v.client.id == id.client);
         let Some(index) = index else {
             tracing::error!("Channel not found");
             return Err(UnexpectedBehaviourSnafu {
-                detail: "No such channel"
-            }.build().into());
+                detail: "No such channel",
+            }
+            .build()
+            .into());
         };
 
+        // let buffer = make_buffer_without_header! {
+        //     u8: SSH_MSG_CHANNEL_CLOSE,
+        //     u32: id.server
+        // };
 
-        let buffer = make_buffer_without_header! {
-            u8: SSH_MSG_CHANNEL_CLOSE,
-            u32: id.server
-        };
+        // self.socket.send_payload(&buffer[..]).await?;
 
-        self.socket.send_payload(&buffer[..]).await?;
-
+        self.socket.send_channel_close(id.server).await?;
 
         let channel = &mut self.channels[index];
-
 
         channel.client.closed = true;
         if channel.server.closed {
@@ -1134,26 +1383,28 @@ where
     }
 
     async fn handle_channel_eof(&mut self, recipient_channel: u32) -> error::Result<()> {
-
-
-        let channel = self.channels.iter_mut().find(|v| v.client.id == recipient_channel);
+        let channel = self
+            .channels
+            .iter_mut()
+            .find(|v| v.client.id == recipient_channel);
         let Some(channel) = channel else {
             tracing::error!("Channel not found");
             return Ok(());
         };
 
-
         if let Err(_) = channel.sender.send(channel::Message::Eof).await {
             tracing::error!("Failed to send message");
         }
-
 
         channel.server.eof = true;
 
         Ok(())
     }
     async fn handle_channel_close(&mut self, recipient_channel: u32) -> error::Result<()> {
-        let index = self.channels.iter_mut().position(|v| v.client.id == recipient_channel);
+        let index = self
+            .channels
+            .iter_mut()
+            .position(|v| v.client.id == recipient_channel);
         let Some(index) = index else {
             tracing::error!("Channel not found");
             return Ok(());
@@ -1170,11 +1421,14 @@ where
             self.channels.remove(index);
         }
 
-
         Ok(())
     }
 
-    async fn channel_request_agent(&mut self, channel_id: IdentityPair, want_reply: bool) -> error::Result<()> {
+    async fn channel_request_agent(
+        &mut self,
+        channel_id: IdentityPair,
+        want_reply: bool,
+    ) -> error::Result<()> {
         let buffer = make_buffer_without_header! {
             u8: SSH_MSG_CHANNEL_REQUEST,
             u32: channel_id.server,
@@ -1401,9 +1655,11 @@ where
         if want_reply {
             self.match_msg(|msg| {
                 Some(match msg {
-                    Message::ChannelClose { recipient_channel } if recipient_channel == id.client => {
+                    Message::ChannelClose { recipient_channel }
+                        if recipient_channel == id.client =>
+                    {
                         Err(super::UnexpectedChannelClosedSnafu.build().into())
-                    },
+                    }
                     Message::ChannelSuccess { recipient_channel } => {
                         if recipient_channel != id.client {
                             Err(super::UnexpectedMessageSnafu {
@@ -1504,13 +1760,13 @@ where
         // }
     }
 
-    async fn channel_open_direct_tcp_ip(&mut self,
-                                        initial_window_size: u32,
-                                        maximum_packet_size: u32,
-                                        target: forward::SocketAddr,
-                                        source: forward::SocketAddr,
+    async fn channel_open_direct_tcp_ip(
+        &mut self,
+        initial_window_size: u32,
+        maximum_packet_size: u32,
+        target: forward::SocketAddr,
+        source: forward::SocketAddr,
     ) -> error::Result<channel::Channel> {
-
         let client_id = self.next_channel_id();
         let buffer = make_buffer_without_header! {
             u8: SSH_MSG_CHANNEL_OPEN,
@@ -1613,7 +1869,6 @@ where
         //     receiver,
         //     session,
         // ))
-
     }
 
     async fn channel_open_session(
@@ -1721,9 +1976,10 @@ where
         // ))
     }
 
-
-    async fn wait_for_opening_channel(&mut self, client: ChannelEndpoint) -> error::Result<channel::Channel> {
-
+    async fn wait_for_opening_channel(
+        &mut self,
+        client: ChannelEndpoint,
+    ) -> error::Result<channel::Channel> {
         let (sender_channel, initial_window_size, maximum_packet_size) = self
             .match_msg(|msg| {
                 Some(match msg {
@@ -1740,8 +1996,8 @@ where
                                     client.id, recipient_channel
                                 ),
                             }
-                                .build()
-                                .into())
+                            .build()
+                            .into())
                         } else {
                             Ok((sender_channel, initial_window_size, maximum_packet_size))
                         }
@@ -1762,8 +2018,8 @@ where
                             reason_code,
                             description,
                         }
-                            .build()
-                            .into())
+                        .build()
+                        .into())
                     }
                     _ => return None,
                 })
@@ -1800,7 +2056,6 @@ where
             receiver,
             session,
         ))
-
     }
 
     pub async fn authenticate_password(
@@ -1837,12 +2092,13 @@ where
                     partial_success,
                 }),
                 Message::UnrecognizedMessage {
-                    code: SSH_MSG_USERAUTH_PASSWD_CHANGEREQ, ..
+                    code: SSH_MSG_USERAUTH_PASSWD_CHANGEREQ,
+                    ..
                 } => Ok(super::AuthenticateResult::PasswordChangeRequired),
                 _ => return None,
             })
         })
-            .await
+        .await
     }
 
     pub async fn authenticate_none(
@@ -1858,29 +2114,34 @@ where
 
         self.socket.send_payload(&buffer[..]).await?;
 
-        self
-            .match_this_msg(|this, msg| {
-                //
-                Some(match msg {
-                    Message::AuthenticationSuccess => {
-                        this.socket.authenticated = true;
-                        Ok(super::AuthenticateResult::Success)
-                    }
-                    Message::AuthenticationFailure {
-                        allow_methods,
-                        partial_success,
-                    } => Ok(super::AuthenticateResult::Failure {
-                        allow_methods: allow_methods.into_iter().map(|v| v.to_string()).collect(),
-                        partial_success,
-                    }),
-                    _ => return None,
-                })
+        self.match_this_msg(|this, msg| {
+            //
+            Some(match msg {
+                Message::AuthenticationSuccess => {
+                    this.socket.authenticated = true;
+                    Ok(super::AuthenticateResult::Success)
+                }
+                Message::AuthenticationFailure {
+                    allow_methods,
+                    partial_success,
+                } => Ok(super::AuthenticateResult::Failure {
+                    allow_methods: allow_methods.into_iter().map(|v| v.to_string()).collect(),
+                    partial_success,
+                }),
+                _ => return None,
             })
-            .await
+        })
+        .await
     }
 
-    pub async fn authenticate_public_key(&mut self, username: &str, r#type: &str, is_certificate: bool, public_blob: &[u8], private_blob: &[u8]) -> error::Result<super::AuthenticateResult> {
-
+    pub async fn authenticate_public_key(
+        &mut self,
+        username: &str,
+        r#type: &str,
+        is_certificate: bool,
+        public_blob: &[u8],
+        private_blob: &[u8],
+    ) -> error::Result<super::AuthenticateResult> {
         let rsa = ["rsa-sha2-512", "rsa-sha2-256", "ssh-rsa"];
 
         let mut signer = None;
@@ -1906,15 +2167,21 @@ where
         }
 
         let Some(mut signer) = signer else {
-            return Err(super::UnsupportedKeyTypeSnafu {
-                r#type
-            }.build().into());
+            return Err(super::UnsupportedKeyTypeSnafu { r#type }.build().into());
         };
 
         tracing::info!("Using signer: {}", signer.name());
 
-        if self.server_algorithms.iter().position(|v| v == r#type).is_none() {
-            tracing::warn!("We don't whether server supports this algorithm: {}, try anyway", signer.name());
+        if self
+            .server_algorithms
+            .iter()
+            .position(|v| v == r#type)
+            .is_none()
+        {
+            tracing::warn!(
+                "We don't whether server supports this algorithm: {}, try anyway",
+                signer.name()
+            );
         }
 
         let r#type = signer.name().to_string();
@@ -1931,34 +2198,34 @@ where
             one: public_blob,
         };
 
-
         self.socket.send_payload(&buffer[..]).await?;
 
-
-
-        let msg = self.match_this_msg(|this, msg| {
-            Some(match msg {
-                Message::AuthenticationSuccess => {
-                    this.socket.authenticated = true;
-                    Ok(Some(super::AuthenticateResult::Success))
-                }
-                Message::AuthenticationFailure { partial_success, allow_methods } => {
-                    Ok(Some(super::AuthenticateResult::Failure {
+        let msg = self
+            .match_this_msg(|this, msg| {
+                Some(match msg {
+                    Message::AuthenticationSuccess => {
+                        this.socket.authenticated = true;
+                        Ok(Some(super::AuthenticateResult::Success))
+                    }
+                    Message::AuthenticationFailure {
+                        partial_success,
+                        allow_methods,
+                    } => Ok(Some(super::AuthenticateResult::Failure {
                         partial_success,
                         allow_methods: allow_methods.into_iter().map(|v| v.to_string()).collect(),
-                    }))
-                }
-                Message::UnrecognizedMessage { code: SSH_MSG_USERAUTH_PK_OK, .. } => {
-                    Ok(None)
-                }
-                _ => return None,
+                    })),
+                    Message::UnrecognizedMessage {
+                        code: SSH_MSG_USERAUTH_PK_OK,
+                        ..
+                    } => Ok(None),
+                    _ => return None,
+                })
             })
-        }).await?;
+            .await?;
 
         if let Some(msg) = msg {
-            return Ok(msg)
+            return Ok(msg);
         }
-
 
         let buffer = make_buffer_without_header! {
             one: &self.session_id,
@@ -1975,7 +2242,6 @@ where
 
         let signature = signer.signature(&buffer[..])?;
 
-
         let len = 4 + r#type.len() + 4 + signature.len();
         let len = len as u32;
         let buffer = make_buffer_without_header! {
@@ -1991,15 +2257,10 @@ where
             one: &signature,
         };
 
-
-
         self.socket.send_payload(&buffer[..]).await?;
-
-
 
         // let mut buffer = make_buffer_without_header! {
         // };
-
 
         self.match_this_msg(|this, msg| {
             Some(match msg {
@@ -2007,15 +2268,17 @@ where
                     this.socket.authenticated = true;
                     Ok(super::AuthenticateResult::Success)
                 }
-                Message::AuthenticationFailure { partial_success, allow_methods } => {
-                    Ok(super::AuthenticateResult::Failure {
-                        partial_success,
-                        allow_methods: allow_methods.into_iter().map(|v| v.to_string()).collect(),
-                    })
-                }
+                Message::AuthenticationFailure {
+                    partial_success,
+                    allow_methods,
+                } => Ok(super::AuthenticateResult::Failure {
+                    partial_success,
+                    allow_methods: allow_methods.into_iter().map(|v| v.to_string()).collect(),
+                }),
                 _ => return None,
             })
-        }).await
+        })
+        .await
     }
 
     pub async fn send_debug_message(

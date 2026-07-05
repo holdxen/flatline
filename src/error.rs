@@ -12,6 +12,7 @@ use crate::ssh::stream::Error as TransportError;
 #[derive(Debug, snafu::Snafu)]
 #[snafu(module(builder), context(suffix(false)), visibility(pub))]
 pub enum Error {
+    #[snafu(display("Invalid format: {}", detail))]
     InvalidFormat {
         detail: String,
     },

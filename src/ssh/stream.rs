@@ -191,11 +191,15 @@ where
         let packet = msg::Packet::parse(&data[4..])?;
 
         if packet.payload.len() > protocol::MAX_PACKET_PAYLOAD_LENGTH {
-            PayloadTooLongSnafu {
+            #[cfg(feature = "strict")]
+            return Err(PayloadTooLongSnafu {
                 maximum: protocol::MAX_PACKET_PAYLOAD_LENGTH,
                 actual: packet.payload.len(),
             }
-            .fail()?;
+            .build().into());
+
+            #[cfg(not(feature = "strict"))]
+            tracing::warn!("Maybe payload is too long, but we ignore it because strict feature is not enabled. payload length: {}", packet.payload.len());
         }
         if packet.payload.is_empty() {
             return Err(PayloadIsEmptySnafu.build().into());
@@ -251,11 +255,12 @@ where
 
         let mut payload_len = payload.len();
         if payload_len > protocol::MAX_PACKET_PAYLOAD_LENGTH {
-            PayloadTooLongSnafu {
+            return Err(PayloadTooLongSnafu {
                 maximum: protocol::MAX_PACKET_PAYLOAD_LENGTH,
                 actual: payload_len,
             }
-            .fail()?;
+            .build()
+            .into());
         }
 
         let tmp;
@@ -713,14 +718,14 @@ where
                             } else {
                                 packet.payload = content.to_vec();
                             }
-                            if packet.payload.len() > protocol::MAX_PACKET_PAYLOAD_LENGTH {
-                                return Err(PayloadTooLongSnafu {
-                                    maximum: protocol::MAX_PACKET_PAYLOAD_LENGTH,
-                                    actual: packet.payload.len(),
-                                }
-                                .build()
-                                .into());
-                            }
+                            // if packet.payload.len() > protocol::MAX_PACKET_PAYLOAD_LENGTH {
+                            //     return Err(PayloadTooLongSnafu {
+                            //         maximum: protocol::MAX_PACKET_PAYLOAD_LENGTH,
+                            //         actual: packet.payload.len(),
+                            //     }
+                            //     .build()
+                            //     .into());
+                            // }
                         }
                         packet.padding = consumer.peek().to_vec();
                         // if packet.padding.len() != padding_len as usize {
@@ -805,10 +810,7 @@ where
 
                             let header = self.socket.fill(block_size).await.context(builder::IO)?;
 
-                            println!("name: {}, block_size: {}", self.decrypt.name(), block_size);
-
                             self.decrypt.update(header, decrypted)?;
-                            println!("finished decrypt");
 
                             assert_eq!(header.len(), decrypted.len());
 
@@ -827,7 +829,6 @@ where
 
                             *encrypted = header.to_vec();
 
-                            println!("set length: {}", len);
                             *length = Some(len);
                             len
                         };
@@ -903,6 +904,19 @@ where
                     self.server.sequence_number = self.server.sequence_number.wrapping_add(1);
                     if packet.payload.is_empty() {
                         return Err(PayloadIsEmptySnafu.build().into());
+                    }
+
+                    if packet.payload.len() > protocol::MAX_PACKET_PAYLOAD_LENGTH {
+                        #[cfg(feature = "strict")]
+                        return Err(PayloadTooLongSnafu {
+                            maximum: protocol::MAX_PACKET_PAYLOAD_LENGTH,
+                            actual: packet.payload.len(),
+                        }
+                        .build()
+                        .into());
+
+                        #[cfg(not(feature = "strict"))]
+                        tracing::warn!("Maybe payload is too long, but we ignore it because strict feature is not enabled. payload length: {}", packet.payload.len());
                     }
                     if packet.payload[0] == protocol::SSH_MSG_NEWKEYS {
                         if self.client.kex_strict && self.server.kex_strict {

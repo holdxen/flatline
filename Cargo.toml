@@ -24,6 +24,7 @@ umac = { git = "https://github.com/holdxen/umac.git", rev = "2571a82984d0c928276
 serde = { version = "1.0.228", features = ["derive"] }
 shlex = "2.0.1"
 bitflags = "2.13.0"
+num_enum = "0.7.6"
 
 [dev-dependencies]
 anyhow = { version = "1.0.103", features = ["backtrace"] }
@@ -38,3 +39,4 @@ walkdir = "2.5.0"
 
 [features]
 umac = ["dep:umac"]
+strict = []

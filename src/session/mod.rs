@@ -86,6 +86,7 @@ pub trait KeyboardInteractive: Send + Sync{
 
 #[derive(Debug, snafu::Snafu)]
 pub enum Error {
+    #[snafu(display("Unexpected behaviour: {}", detail))]
     UnexpectedBehaviour {
         detail: String
     },
@@ -113,12 +114,17 @@ pub enum Error {
     },
     RequestFailure,
     InvalidPort,
+    UnexpectedChannelClosed,
+    UnexpectedChannelEof,
+
     #[snafu(transparent)]
     SecureCopyProtocolError {
         source: scp::Error,
     },
-    UnexpectedChannelClosed,
-    UnexpectedChannelEof,
+    #[snafu(transparent)]
+    SSHFileTransferProtocolError {
+        source: sftp::Error,
+    },
 }
 
 #[easy_ext::ext(UnexpectedSendingError)]

@@ -1,10 +1,8 @@
 use std::str::Utf8Error;
-use bytes::{Buf, BytesMut};
 use regex::Regex;
 use snafu::{OptionExt, ResultExt};
-use super::UnexpectedMessageSnafu;
 use crate::error;
-use super::channel::{self, BufferChannel, Channel, Message};
+use super::channel::{self, BufferChannel, Message};
 
 #[derive(Debug, snafu::Snafu)]
 pub enum Error {
@@ -25,6 +23,12 @@ pub enum Error {
     },
     InvalidTargetName {
         source: shlex::QuoteError
+    }
+}
+
+impl Error {
+    pub fn is_broken(&self) -> bool {
+        matches!(self, Error::Failure { .. } | Error::Critical { .. })
     }
 }
 

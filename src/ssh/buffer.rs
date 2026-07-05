@@ -29,6 +29,9 @@ macro_rules! match_type {
     (bytes, $i:expr) => {
         $i.len()
     };
+    (one_list_u32, $i:expr) => {
+        (4 + $i.len() * 4)
+    };
 }
 
 macro_rules! put_type {
@@ -46,6 +49,14 @@ macro_rules! put_type {
     };
     ($buffer:ident, bytes, $i:expr) => {
         $buffer.put_bytes($i)
+    };
+    ($buffer:ident, one_list_u32, $i:expr) => {
+        {
+            $buffer.put_u32((4 + $i.len() * 4) as u32);
+            for &item in $i {
+                $buffer.put_u32(item);
+            }
+        }
     };
 }
 

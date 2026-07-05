@@ -1,5 +1,4 @@
-use super::*;
-use crate::error::{Result, builder};
+use crate::error::Result;
 use flate2::{Compress, Compression, Decompress, Status};
 use std::mem;
 
@@ -82,15 +81,15 @@ struct Never {
 }
 
 struct ZEncoder {
-    compress_in_auth: bool,
+    compress_in_authentication: bool,
     encoder: Compress,
     buf: Vec<u8>,
 }
 
 impl ZEncoder {
-    fn new(compress_in_auth: bool) -> Self {
+    fn new(compress_in_authentication: bool) -> Self {
         Self {
-            compress_in_auth,
+            compress_in_authentication,
             encoder: Compress::new(Compression::default(), true),
             buf: vec![],
         }
@@ -99,7 +98,7 @@ impl ZEncoder {
 
 impl Encode for ZEncoder {
     fn compress_in_authentication(&self) -> bool {
-        self.compress_in_auth
+        self.compress_in_authentication
     }
 
     fn update(&mut self, data: &[u8]) -> Result<()> {

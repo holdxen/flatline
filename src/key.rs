@@ -5,10 +5,9 @@ use openssl::base64::decode_block;
 use openssl::bn::BigNumContext;
 use openssl::ec::PointConversionForm;
 use openssl::pkey::{Id, PKey};
-use openssl::rsa::Rsa;
 use snafu::{OptionExt, ResultExt};
 
-use crate::error::{ok, Result};
+use crate::error::Result;
 use crate::ssh::buffer::{Consumer, Producer};
 use crate::{
     cipher::{

@@ -1075,7 +1075,6 @@ mod test {
 }
 
 
-
 #[derive(derive_more::Debug)]
 pub struct BufferChannel {
     channel: channel::Channel,
@@ -1104,10 +1103,13 @@ impl BufferChannel {
             return Ok(());
         }
 
+        let mut pos = 0;
         loop {
-            let written = self.channel.send(&self.write_buf[..]).await?;
+            let written = self.channel.send(&self.write_buf[pos..]).await?;
 
-            if written == self.write_buf.len() {
+            pos += written;
+
+            if pos == self.write_buf.len() {
                 self.write_buf.clear();
                 break;
             } else {
@@ -1123,7 +1125,9 @@ impl BufferChannel {
                         Message::Stdout(data) => {
                             self.read_buf.extend_from_slice(&data[..]);
                         }
-                        Message::Stderr(_) => {}
+                        Message::Stderr(_) => {
+                            tracing::warn!("Unexpected stderr message");
+                        }
                         Message::Exit(status) => {
                             tracing::info!("Unexpected exit status: {:?}", status);
                         }
@@ -1140,11 +1144,18 @@ impl BufferChannel {
     }
 
     pub async fn send(&mut self, data: &[u8]) -> error::Result<()> {
-        self.write_buf.extend_from_slice(data);
+        if self.write_buf.is_empty() {
+            let size = self.channel.send(data).await?;
+            if size < data.len() {
+                self.write_buf.extend_from_slice(&data[size..]);
+            }
+        } else {
+            self.write_buf.extend_from_slice(data);
 
-        let written = self.channel.send(&self.write_buf[..]).await?;
+            let written = self.channel.send(&self.write_buf[..]).await?;
 
-        self.write_buf.advance(written);
+            self.write_buf.advance(written);
+        }
 
         Ok(())
     }

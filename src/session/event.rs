@@ -116,6 +116,9 @@ pub(super) enum Event {
         channel_id: IdentityPair,
         back: oneshot::Sender<error::Result<()>>,
     },
+    ChannelClean {
+        back: oneshot::Sender<error::Result<()>>,
+    },
     GlobalRequestTcpIPForward {
         addr: forward::SocketAddr,
         initial_window_size: u32,
