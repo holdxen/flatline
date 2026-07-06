@@ -2,8 +2,6 @@ mod cipher;
 mod error;
 #[macro_use]
 pub mod ssh;
-#[macro_use]
-mod log;
 mod key;
 pub mod session;
 mod stream;
