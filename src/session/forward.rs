@@ -84,7 +84,7 @@ impl Listener {
         }
     }
 
-    fn addr(&self) -> &SocketAddr {
+    pub fn addr(&self) -> &SocketAddr {
         &self.addr
     }
 

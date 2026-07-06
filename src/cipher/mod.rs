@@ -83,7 +83,6 @@ macro_rules! algo_list {
 
 pub mod compress;
 pub mod crypt;
-pub mod hash;
 pub mod kex;
 pub mod mac;
 pub mod signature;

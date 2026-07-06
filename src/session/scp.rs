@@ -2,7 +2,7 @@ use std::str::Utf8Error;
 use regex::Regex;
 use snafu::{OptionExt, ResultExt};
 use crate::error;
-use super::channel::{self, BufferChannel, Message};
+use super::channel::{self, BufferChannel};
 
 #[derive(Debug, snafu::Snafu)]
 pub enum Error {
@@ -61,6 +61,14 @@ impl<'a> FileReceiver<'a> {
         }
     }
 
+    pub fn file_name(&self) -> &str {
+        &self.file_name
+    }
+
+    pub fn mode(&self) -> u16 {
+        self.mode
+    }
+
     pub fn is_finished(&self) -> bool {
         debug_assert!(self.received <= self.size + 1);
         self.received == self.size + 1
@@ -99,10 +107,10 @@ impl<'a> FileSender<'a> {
     fn new(stream: &'a mut Handle) -> Self {
         Self { stream }
     }
-    async fn send(&mut self, data: &[u8]) -> error::Result<()> {
+    pub async fn send(&mut self, data: &[u8]) -> error::Result<()> {
         self.stream.send(data).await
     }
-    async fn finish(&mut self) -> error::Result<()> {
+    pub async fn finish(&mut self) -> error::Result<()> {
         self.stream.send(&[0]).await?;
         self.stream.flush().await?;
 
@@ -126,7 +134,7 @@ impl Handle {
         self.channel.send(data).await
     }
 
-    async fn close(self) -> error::Result<()> {
+    pub async fn close(self) -> error::Result<()> {
         self.channel.close().await
     }
 
@@ -138,7 +146,7 @@ impl Handle {
         Ok(data)
     }
 
-    async fn start_receiving(&mut self, target: &str) -> error::Result<FileReceiver<'_>> {
+    pub async fn start_receiving(&mut self, target: &str) -> error::Result<FileReceiver<'_>> {
         let target = shlex::try_quote(target).context(InvalidTargetNameSnafu)?.to_string();
         let command = format!("scp -f {}", target);
 
@@ -174,7 +182,7 @@ impl Handle {
         Ok(FileReceiver::new(self, mode, size, filename))
     }
 
-    async fn start_sending(&mut self, target: &str, recursive: bool) -> error::Result<()> {
+    pub async fn start_sending(&mut self, target: &str, recursive: bool) -> error::Result<()> {
         let target = shlex::try_quote(target).context(InvalidTargetNameSnafu)?.to_string();
         let command = if recursive {
             format!("scp -t -r {}", target)
@@ -226,7 +234,7 @@ impl Handle {
     }
 
 
-    async fn set_timestamp(&mut self, mtime_sec: u64, mtime_usec: u64, atime_sec: u64, atime_usec: u64) -> error::Result<()> {
+    pub async fn set_timestamp(&mut self, mtime_sec: u64, mtime_usec: u64, atime_sec: u64, atime_usec: u64) -> error::Result<()> {
         let line = format!("T{} {} {} {}\n", mtime_sec, mtime_usec, atime_sec, atime_usec);
         self.channel.send(line.as_bytes()).await?;
         self.channel.flush().await?;
@@ -237,7 +245,7 @@ impl Handle {
 
 
 
-    async fn start_sending_file(&mut self, permission: u16, size: u64, file_name: &str) -> error::Result<FileSender<'_>> {
+    pub async fn start_sending_file(&mut self, permission: u16, size: u64, file_name: &str) -> error::Result<FileSender<'_>> {
         let file_name = shlex::try_quote(file_name).context(InvalidTargetNameSnafu)?.to_string();
         let line = format!("C0{:o} {} {}\n", permission, size, file_name);
 
@@ -248,9 +256,8 @@ impl Handle {
         Ok(FileSender::new(self))
     }
 
-    async fn enter(&mut self, permission: u16, target: &str) -> error::Result<()> {
+    pub async fn enter(&mut self, permission: u16, target: &str) -> error::Result<()> {
         let line = format!("D0{:o} 0 {}\n", permission, target);
-        tracing::info!("sending: {}", line);
         self.channel.send(line.as_bytes()).await?;
         self.channel.flush().await?;
 
@@ -259,14 +266,14 @@ impl Handle {
         Ok(())
     }
 
-    async fn exit(&mut self) -> error::Result<()> {
+    pub async fn exit(&mut self) -> error::Result<()> {
         self.channel.send("E\n".as_bytes()).await?;
         self.channel.flush().await?;
         self.wait_for_response().await?;
         Ok(())
     }
 
-    pub(super) fn new(channel: channel::Channel) -> Self {
+    pub fn new(channel: channel::Channel) -> Self {
         Self { channel: BufferChannel::new(channel) }
     }
 }
@@ -328,19 +335,19 @@ mod test {
             channel.request_exec(true, "md5sum /tmp/scp/test.bin").await?;
             loop {
                 match channel.receive().await? {
-                    Message::Close => {
+                    channel::Message::Close => {
                         tracing::info!("channel.close");
                         break;
                     }
-                    Message::Eof => {}
-                    Message::Stdout(data) => {
+                    channel::Message::Eof => {}
+                    channel::Message::Stdout(data) => {
                         let data = String::from_utf8(data)?;
                         assert!(data.starts_with(md5.as_str()));
                     }
-                    Message::Stderr(_) => {}
-                    Message::Exit(_) => {}
-                    Message::FlowControl { .. } => {}
-                    Message::WindowChange { .. } => {}
+                    channel::Message::Stderr(_) => {}
+                    channel::Message::Exit(_) => {}
+                    channel::Message::FlowControl { .. } => {}
+                    channel::Message::WindowChange { .. } => {}
                 }
             }
         }

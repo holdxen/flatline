@@ -1,8 +1,8 @@
-mod cipher;
-mod error;
+pub mod cipher;
+pub mod error;
 #[macro_use]
 pub mod ssh;
-mod key;
+pub mod key;
 pub mod session;
 mod stream;
 

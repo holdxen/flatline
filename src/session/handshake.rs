@@ -2,7 +2,7 @@ use std::str::{Utf8Error, from_utf8};
 
 use indexmap::IndexMap;
 use rand::RngExt;
-use snafu::{OptionExt, ResultExt};
+use snafu::ResultExt;
 use tokio::io::{AsyncRead, AsyncWrite};
 
 use crate::{
@@ -16,10 +16,9 @@ use crate::{
     },
     error::{self, builder},
     ssh::{
-        MultiplePrecisionInteger,
         buffer::{Consumer, Producer},
         msg::{self, DisconnectReason, Message},
-        protocol::{self, SSH_MSG_KEX_DH_GEX_INIT},
+        protocol::{self},
         stream::{CipherStream, PlainStream, Stream},
     },
     stream::BufferStream,
@@ -290,7 +289,7 @@ where
     pub async fn banner_version_exchange(&mut self) -> error::Result<()> {
         use regex::Regex;
         let re = Regex::new(
-            r"^SSH-(?P<version>2\.0|1\.99)-(?P<software>[\x21-\x2B\x2E-\x7E]+)(?: (?P<comments>[\x20-\x7E]*))?$"
+            r"^SSH-(?P<version>2\.0|1\.99)-(?P<software>[\x21-\x2B\x2E-\x7E]+)(?: (?P<comment>[\x20-\x7E]*))?$"
         ).expect("Invalid reggular expression");
         let stream = self.socket.as_mut().unwrap();
 
@@ -346,7 +345,8 @@ where
                             .into());
                     }
                     let software = &caps["software"];
-                    let comments = caps.name("comments").map(|v| v.as_str().to_string());
+                    let comment = caps.name("comment").map(|v| v.as_str().to_string());
+                    tracing::info!("Server banner: version={}, software={}, comment={:?}", version, software, comment);
 
                     self.compat_options = CompatOptions::parse(software);
                     self.server_version = Some(line.to_string());
@@ -511,7 +511,10 @@ where
                 is_curve = true;
                 &mut **curve25519
             }
-            kex::Algorithm::Streamlined(streamlined) => todo!(),
+            kex::Algorithm::Streamlined(streamlined) => {
+                is_curve = true;
+                &mut **streamlined
+            },
             kex::Algorithm::Hybrid(hybrid) => {
                 is_curve = true;
                 &mut **hybrid

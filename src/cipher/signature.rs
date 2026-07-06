@@ -16,7 +16,7 @@ use openssl::{
 use snafu::{OptionExt, ResultExt};
 
 use crate::{
-    error::{Error, Result, builder},
+    error::{Result, builder},
     ssh::{
         MultiplePrecisionInteger,
         buffer::{Consumer, Producer, make_buffer_without_header, match_type, put_type},

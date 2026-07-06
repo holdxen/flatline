@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::io::stdout;
 use std::str::Utf8Error;
 
 use super::*;
@@ -73,7 +72,7 @@ impl Signal {
 }
 
 #[derive(Debug, Default)]
-pub struct Packet {
+pub(crate) struct Packet {
     pub payload: Vec<u8>,
     pub padding: Vec<u8>,
 }
@@ -163,7 +162,7 @@ pub(crate) enum Message<'a> {
     ChannelFlowControl {
         recipient_channel: u32,
         want_reply: bool,
-        on: bool
+        on: bool,
     },
     ChannelExitStatus {
         recipient_channel: u32,
@@ -198,9 +197,14 @@ pub(crate) enum Message<'a> {
         initial_window_size: u32,
         maximum_packet_size: u32,
     },
-    ChannelOpenUnknown {
-
+    ChannelOpenX11 {
+        sender_channel: u32,
+        initial_window_size: u32,
+        maximum_packet_size: u32,
+        originator_address: &'a str,
+        originator_port: u32,
     },
+    ChannelOpenUnknown {},
     ChannelUnknownRequest {
         recipient_channel: u32,
         r#type: &'a str,
@@ -385,7 +389,7 @@ impl<'a> Message<'a> {
                     Ok(Message::ChannelFlowControl {
                         recipient_channel,
                         want_reply,
-                        on
+                        on,
                     })
                 } else if r#type == b"exit-status" {
                     let want_reply = consumer.consume_u8()? != 0;
@@ -400,9 +404,10 @@ impl<'a> Message<'a> {
                     let signal = consumer.consume_one()?;
                     let signal = std::str::from_utf8(signal).context(ExpectStringSnafu)?;
                     let core_dumped = consumer.consume_u8()? != 0;
-                    let error_message = std::str::from_utf8(consumer.consume_one()?).context(ExpectStringSnafu)?;
-                    let language = std::str::from_utf8(consumer.consume_one()?).context(ExpectStringSnafu)?;
-
+                    let error_message =
+                        std::str::from_utf8(consumer.consume_one()?).context(ExpectStringSnafu)?;
+                    let language =
+                        std::str::from_utf8(consumer.consume_one()?).context(ExpectStringSnafu)?;
 
                     Ok(Self::ChannelExitSignal {
                         recipient_channel,
@@ -418,20 +423,18 @@ impl<'a> Message<'a> {
                     Ok(Self::ChannelUnknownRequest {
                         recipient_channel,
                         want_reply,
-                        r#type
+                        r#type,
                     })
                 }
             }
             SSH_MSG_GLOBAL_REQUEST => {
-
-                let r#type = std::str::from_utf8(consumer.consume_one()?).context(ExpectStringSnafu)?;
+                let r#type =
+                    std::str::from_utf8(consumer.consume_one()?).context(ExpectStringSnafu)?;
                 let want_reply = consumer.consume_u8()? != 0;
 
                 match r#type {
                     openssh::SSH_GLOBAL_REQUEST_TYPE_KEEP_ALIVE => {
-                        Ok(Self::GlobalRequestKeepAliveOpenSSH {
-                            want_reply,
-                        })
+                        Ok(Self::GlobalRequestKeepAliveOpenSSH { want_reply })
                     }
                     openssh::SSH_GLOBAL_REQUEST_TYPE_HOST_KEYS => {
                         let mut host_keys = Vec::with_capacity(16);
@@ -440,20 +443,15 @@ impl<'a> Message<'a> {
                         }
                         Ok(Self::GlobalRequestHostKeysOpenSSH {
                             want_reply,
-                            host_keys
+                            host_keys,
                         })
                     }
-                    _ => {
-                        Ok(Self::GlobalUnknownRequest {
-                            want_reply,
-                            r#type
-                        })
-                    }
+                    _ => Ok(Self::GlobalUnknownRequest { want_reply, r#type }),
                 }
-
             }
             SSH_MSG_CHANNEL_OPEN => {
-                let r#type = std::str::from_utf8(consumer.consume_one()?).context(ExpectStringSnafu)?;
+                let r#type =
+                    std::str::from_utf8(consumer.consume_one()?).context(ExpectStringSnafu)?;
 
                 match r#type {
                     SSH_CHANNEL_TYPE_FORWARDED_TCP_IP => {
@@ -461,10 +459,12 @@ impl<'a> Message<'a> {
                         let initial_window_size = consumer.consume_u32()?;
                         let maximum_packet_size = consumer.consume_u32()?;
                         let connected_address = consumer.consume_one()?;
-                        let connected_address = std::str::from_utf8(connected_address).context(ExpectStringSnafu)?;
+                        let connected_address =
+                            std::str::from_utf8(connected_address).context(ExpectStringSnafu)?;
                         let connected_port = consumer.consume_u32()?;
                         let originator_address = consumer.consume_one()?;
-                        let originator_address = std::str::from_utf8(originator_address).context(ExpectStringSnafu)?;
+                        let originator_address =
+                            std::str::from_utf8(originator_address).context(ExpectStringSnafu)?;
                         let originator_port = consumer.consume_u32()?;
 
                         Ok(Self::ChannelOpenForwardedTcpIp {
@@ -488,16 +488,32 @@ impl<'a> Message<'a> {
                             maximum_packet_size,
                         })
                     }
-                    _ => {
-                        Ok(Self::ChannelOpenUnknown {})
+                    SSH_CHANNEL_TYPE_X11 => {
+                        let sender_channel = consumer.consume_u32()?;
+                        let initial_window_size = consumer.consume_u32()?;
+                        let maximum_packet_size = consumer.consume_u32()?;
+
+                        let originator_address = std::str::from_utf8(consumer.consume_one()?)
+                            .context(ExpectStringSnafu)?;
+                        let originator_port = consumer.consume_u32()?;
+                        Ok(Self::ChannelOpenX11 {
+                            sender_channel,
+                            initial_window_size,
+                            maximum_packet_size,
+                            originator_address,
+                            originator_port,
+                        })
                     }
+                    _ => Ok(Self::ChannelOpenUnknown {}),
                 }
-
-
             }
-            SSH_MSG_PING => {
+            openssh::SSH_MSG_PING => {
                 let data = consumer.consume_one()?;
                 Ok(Self::Ping { data })
+            }
+            openssh::SSH_MSG_PONG => {
+                let data = consumer.consume_one()?;
+                Ok(Self::Pong { data })
             }
             SSH_MSG_CHANNEL_CLOSE => {
                 let recipient_channel = consumer.consume_u32()?;
@@ -507,13 +523,12 @@ impl<'a> Message<'a> {
                 let recipient_channel = consumer.consume_u32()?;
                 Ok(Self::ChannelEof { recipient_channel })
             }
-            SSH_MSG_REQUEST_SUCCESS => {
-                Ok(Self::RequestSuccess)
-            }
-            SSH_MSG_REQUEST_FAILURE => {
-                Ok(Self::RequestFailure)
-            }
-            code => Ok(Message::UnrecognizedMessage { code, data: consumer.peek() }),
+            SSH_MSG_REQUEST_SUCCESS => Ok(Self::RequestSuccess),
+            SSH_MSG_REQUEST_FAILURE => Ok(Self::RequestFailure),
+            code => Ok(Message::UnrecognizedMessage {
+                code,
+                data: consumer.peek(),
+            }),
         }
     }
 }

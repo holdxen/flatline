@@ -3,13 +3,13 @@ pub mod channel;
 pub mod event;
 mod handshake;
 mod notifier;
-mod scp;
+pub mod scp;
 
 mod agent;
 
-mod sftp;
+pub mod sftp;
 
-mod forward;
+pub mod forward;
 
 use indexmap::IndexMap;
 pub use handshake::Config;
@@ -441,6 +441,16 @@ impl Session {
         let channel  = receiver.receive_next().await??;
 
         sftp::Handle::handshake(channel).await
+    }
+
+    pub async fn channel_clean(&self) -> error::Result<()> {
+        let (sender, receiver) = oneshot::channel();
+
+        let event = Event::ChannelClean { back: sender };
+
+        self.sender.send_next(event).await?;
+
+        receiver.receive_next().await?
     }
 }
 

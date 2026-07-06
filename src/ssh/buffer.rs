@@ -246,7 +246,7 @@ impl<'a> Consumer<'a> {
     
     pub fn is_empty(&self) -> bool {
         assert!(self.pos <= self.data.len());
-        self.pos == self.data.len()
+        self.len() == 0
     }
 
     pub fn peek(&self) -> &'a [u8] {

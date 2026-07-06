@@ -1,9 +1,9 @@
+use super::{Event, UnexpectedReceivingError, UnexpectedSendingError, channel};
+use crate::{error, ssh::msg::Signal};
 use bytes::{Buf, BytesMut};
 use snafu::OptionExt;
-use tokio::sync::{mpsc, oneshot};
 use tokio::sync::mpsc::error::{TryRecvError, TrySendError};
-use super::{channel, Event, UnexpectedReceivingError, UnexpectedSendingError};
-use crate::{error, ssh::msg::Signal};
+use tokio::sync::{mpsc, oneshot};
 
 #[derive(Debug, Clone)]
 pub enum ExitStatus {
@@ -38,8 +38,8 @@ pub enum Message {
         on: bool,
     },
     WindowChange {
-        size: u32
-    }
+        size: u32,
+    },
 }
 
 /// SSH Terminal Modes Opcode 定义
@@ -706,13 +706,13 @@ pub mod presets {
 }
 
 #[derive(Clone, Copy, Hash, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
-pub(super) struct IdentityPair {
+pub struct IdentityPair {
     pub client: u32,
     pub server: u32,
 }
 
 impl IdentityPair {
-    pub fn new(client: u32, server: u32) -> IdentityPair {
+    pub(super) fn new(client: u32, server: u32) -> IdentityPair {
         Self { client, server }
     }
 }
@@ -742,7 +742,7 @@ impl Drop for Channel {
         if let Err(err) = self.sender.try_send(event) {
             match err {
                 TrySendError::Full(_) => {
-                   tracing::warn!("Failed to close channel")
+                    tracing::warn!("Failed to close channel")
                 }
                 TrySendError::Closed(_) => {
                     tracing::warn!("Channel is shutdown")
@@ -753,10 +753,9 @@ impl Drop for Channel {
 
         self.closed = true;
 
-         if let Err(_)  = receiver.try_recv() {
-             tracing::warn!("Failed to wait for channel closed")
-         }
-
+        if let Err(_) = receiver.try_recv() {
+            tracing::warn!("Failed to wait for channel closed")
+        }
     }
 }
 
@@ -805,19 +804,14 @@ impl Channel {
     }
 
     pub fn try_receive(&mut self) -> error::Result<Option<Message>> {
-
         match self.receiver.try_recv() {
-            Ok(v) => {
-                Ok(Some(v))
+            Ok(v) => Ok(Some(v)),
+            Err(TryRecvError::Empty) => Ok(None),
+            Err(TryRecvError::Disconnected) => Err(super::UnexpectedBehaviourSnafu {
+                detail: "Maybe session was shutdown",
             }
-            Err(TryRecvError::Empty) => {
-                Ok(None)
-            }
-            Err(TryRecvError::Disconnected) => {
-                Err(super::UnexpectedBehaviourSnafu {
-                    detail: "Maybe session was shutdown"
-                }.build().into())
-            }
+            .build()
+            .into()),
         }
     }
 
@@ -827,7 +821,7 @@ impl Channel {
             .recv()
             .await
             .context(super::UnexpectedBehaviourSnafu {
-                detail: "Maybe session was shutdown"
+                detail: "Maybe session was shutdown",
             })?;
         Ok(msg)
     }
@@ -848,8 +842,71 @@ impl Channel {
         Ok(size)
     }
 
+    pub async fn request_x11(
+        &mut self,
+        want_reply: bool,
+        single_connection: bool,
+        protocol: impl Into<String>,
+        cookie: impl Into<String>,
+        screen: u32,
+    ) -> error::Result<()> {
+        let (sender, receiver) = oneshot::channel();
+        let event = Event::ChannelRequestX11 {
+            channel_id: self.id,
+            want_reply,
+            single_connection,
+            protocol: protocol.into(),
+            cookie: cookie.into(),
+            screen,
+            back: sender,
+        };
 
-    pub async fn request_window_change(&self, columns: u32, rows: u32, width: u32, height: u32) -> error::Result<()> {
+        self.sender.send_next(event).await?;
+
+        receiver.receive_next().await?
+    }
+
+    pub async fn request_env(
+        &mut self,
+        want_reply: bool,
+        name: impl Into<String>,
+        value: impl Into<String>,
+    ) -> error::Result<()> {
+        let (sender, receiver) = oneshot::channel();
+        let event = Event::ChannelRequestEnv {
+            channel_id: self.id,
+            want_reply,
+            name: name.into(),
+            value: value.into(),
+            back: sender,
+        };
+
+        self.sender.send_next(event).await?;
+
+        receiver.receive_next().await?
+    }
+
+    pub async fn request_signal(&self, want_reply: bool, signal: Signal) -> error::Result<()> {
+        let (sender, receiver) = oneshot::channel();
+        let event = Event::ChannelRequestSignal {
+            channel_id: self.id,
+            want_reply,
+            signal: signal.0,
+            back: sender,
+        };
+
+        self.sender.send_next(event).await?;
+
+        receiver.receive_next().await?
+    }
+
+    pub async fn request_window_change(
+        &self,
+        columns: u32,
+        rows: u32,
+        width: u32,
+        height: u32,
+    ) -> error::Result<()> {
         let (sender, receiver) = oneshot::channel();
         let event = Event::ChannelRequestWindowChange {
             channel_id: self.id,
@@ -865,7 +922,11 @@ impl Channel {
         receiver.receive_next().await?
     }
 
-    pub async fn request_exec(&self, want_reply: bool, command: impl Into<String>) -> error::Result<()> {
+    pub async fn request_exec(
+        &self,
+        want_reply: bool,
+        command: impl Into<String>,
+    ) -> error::Result<()> {
         let (sender, receiver) = oneshot::channel();
         let event = Event::ChannelRequestExec {
             channel_id: self.id,
@@ -877,7 +938,6 @@ impl Channel {
         self.sender.send_next(event).await?;
 
         receiver.receive_next().await?
-
     }
 
     pub async fn request_shell(&self, want_reply: bool) -> error::Result<()> {
@@ -901,18 +961,12 @@ impl Channel {
             back: sender,
         };
 
-
         self.sender.send_next(event).await?;
-
 
         receiver.receive_next().await?
     }
 
-    pub async fn request_break(
-        &self,
-        want_reply: bool,
-        milliseconds: u32,
-    ) -> error::Result<()> {
+    pub async fn request_break(&self, want_reply: bool, milliseconds: u32) -> error::Result<()> {
         let (sender, receiver) = oneshot::channel();
         let event = Event::ChannelRequestBreak {
             channel_id: self.id,
@@ -954,7 +1008,176 @@ impl Channel {
     }
 }
 
+#[derive(derive_more::Debug)]
+pub struct BufferChannel {
+    channel: channel::Channel,
+    #[debug(skip)]
+    write_buf: BytesMut,
+    #[debug(skip)]
+    read_buf: BytesMut,
+}
+
+impl BufferChannel {
+    pub(super) fn new(channel: channel::Channel) -> Self {
+        Self {
+            channel,
+            write_buf: Default::default(),
+            read_buf: Default::default(),
+        }
+    }
+
+    pub fn channel_mut(&mut self) -> &mut channel::Channel {
+        &mut self.channel
+    }
+
+    pub async fn flush(&mut self) -> error::Result<()> {
+        if self.write_buf.is_empty() {
+            return Ok(());
+        }
+
+        let mut pos = 0;
+        loop {
+            let written = self.channel.send(&self.write_buf[pos..]).await?;
+
+            pos += written;
+
+            if pos == self.write_buf.len() {
+                self.write_buf.clear();
+                break;
+            } else {
+                loop {
+                    match self.channel.receive().await? {
+                        Message::Close => {
+                            return Err(super::UnexpectedMessageSnafu {
+                                detail: "Unexpected close message",
+                            }
+                            .build()
+                            .into());
+                        }
+                        Message::Eof => {}
+                        Message::Stdout(data) => {
+                            self.read_buf.extend_from_slice(&data[..]);
+                        }
+                        Message::Stderr(_) => {
+                            tracing::warn!("Unexpected stderr message");
+                        }
+                        Message::Exit(status) => {
+                            tracing::info!("Unexpected exit status: {:?}", status);
+                        }
+                        Message::FlowControl { .. } => {}
+                        Message::WindowChange { .. } => {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    pub async fn send(&mut self, data: &[u8]) -> error::Result<()> {
+        if self.write_buf.is_empty() {
+            let size = self.channel.send(data).await?;
+            if size < data.len() {
+                self.write_buf.extend_from_slice(&data[size..]);
+            }
+        } else {
+            self.write_buf.extend_from_slice(data);
+
+            let written = self.channel.send(&self.write_buf[..]).await?;
+
+            self.write_buf.advance(written);
+        }
+
+        Ok(())
+    }
+
+    pub fn consumer_read_buffer(&mut self, len: usize) {
+        if len == 0 || self.read_buf.is_empty() {
+            return;
+        }
+
+        assert!(self.read_buf.len() >= len);
+
+        self.read_buf.advance(len);
+    }
+
+    pub async fn fill_once(&mut self) -> error::Result<()> {
+        loop {
+            let msg = self.channel.receive().await?;
+            match msg {
+                Message::Close => {
+                    tracing::warn!("Unexpected close message");
+                    return Err(super::UnexpectedMessageSnafu {
+                        detail: "Unexpected close message",
+                    }
+                    .build()
+                    .into());
+                }
+                Message::Eof => {
+                    tracing::warn!("Unexpected eof message");
+                    return Err(super::UnexpectedMessageSnafu {
+                        detail: "Unexpected eof message",
+                    }
+                    .build()
+                    .into());
+                }
+                Message::Stdout(data) => {
+                    self.read_buf.extend_from_slice(&data[..]);
+                    break Ok(());
+                }
+                Message::Stderr(_) => {
+                    tracing::warn!("Unexpected stderr message");
+                }
+                Message::Exit(status) => {
+                    tracing::info!("Unexpected exit message: {:?}", status);
+                }
+                Message::FlowControl { .. } => {
+                    tracing::info!("Unexpected flow control message");
+                }
+                Message::WindowChange { .. } => {}
+            }
+        }
+    }
+
+    pub async fn fill(&mut self) -> error::Result<&[u8]> {
+        while self.read_buf.is_empty() {
+            self.fill_once().await?;
+        }
+        Ok(&self.read_buf[..])
+    }
+
+    pub async fn fill_exact(&mut self, len: usize) -> error::Result<&[u8]> {
+        if len == 0 {
+            return Ok(&[]);
+        }
+        while self.read_buf.len() < len {
+            self.fill_once().await?;
+        }
+
+        Ok(&self.read_buf[..len])
+    }
+
+    pub async fn read_line_lf(&mut self) -> error::Result<&[u8]> {
+        let mut pos = 0;
+        loop {
+            for i in pos..self.read_buf.len() {
+                if self.read_buf[i] == b'\n' {
+                    return Ok(&self.read_buf[..=i]);
+                }
+            }
+            pos = self.read_buf.len();
+            self.fill_once().await?;
+        }
+    }
+
+    pub async fn close(self) -> error::Result<()> {
+        self.channel.close().await
+    }
+}
 #[cfg(test)]
+
 mod test {
     use super::*;
 
@@ -1071,172 +1294,5 @@ mod test {
         // 编码
         let encoded = TtyModesParser::encode(&modes);
         println!("\nEncoded data: {:?}", encoded);
-    }
-}
-
-
-#[derive(derive_more::Debug)]
-pub struct BufferChannel {
-    channel: channel::Channel,
-    #[debug(skip)]
-    write_buf: BytesMut,
-    #[debug(skip)]
-    read_buf: BytesMut,
-}
-
-impl BufferChannel {
-    pub(super) fn new(channel: channel::Channel) -> Self {
-        Self {
-            channel,
-            write_buf: Default::default(),
-            read_buf: Default::default(),
-        }
-    }
-
-
-    pub fn channel_mut(&mut self) -> &mut channel::Channel {
-        &mut self.channel
-    }
-
-    pub async fn flush(&mut self) -> error::Result<()> {
-        if self.write_buf.is_empty() {
-            return Ok(());
-        }
-
-        let mut pos = 0;
-        loop {
-            let written = self.channel.send(&self.write_buf[pos..]).await?;
-
-            pos += written;
-
-            if pos == self.write_buf.len() {
-                self.write_buf.clear();
-                break;
-            } else {
-                loop {
-                    match self.channel.receive().await? {
-                        Message::Close => {
-                            return Err(super::UnexpectedMessageSnafu {
-                                detail: "Unexpected close message"
-                            }.build().into())
-                        }
-                        Message::Eof => {
-                        }
-                        Message::Stdout(data) => {
-                            self.read_buf.extend_from_slice(&data[..]);
-                        }
-                        Message::Stderr(_) => {
-                            tracing::warn!("Unexpected stderr message");
-                        }
-                        Message::Exit(status) => {
-                            tracing::info!("Unexpected exit status: {:?}", status);
-                        }
-                        Message::FlowControl { .. } => {}
-                        Message::WindowChange { .. } => {
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-
-        Ok(())
-    }
-
-    pub async fn send(&mut self, data: &[u8]) -> error::Result<()> {
-        if self.write_buf.is_empty() {
-            let size = self.channel.send(data).await?;
-            if size < data.len() {
-                self.write_buf.extend_from_slice(&data[size..]);
-            }
-        } else {
-            self.write_buf.extend_from_slice(data);
-
-            let written = self.channel.send(&self.write_buf[..]).await?;
-
-            self.write_buf.advance(written);
-        }
-
-        Ok(())
-    }
-
-    pub fn consumer_read_buffer(&mut self, len: usize) {
-        if len == 0 || self.read_buf.is_empty() {
-            return;
-        }
-
-        assert!(self.read_buf.len() >= len);
-
-        self.read_buf.advance(len);
-
-    }
-
-    pub async fn fill_once(&mut self) -> error::Result<()> {
-        loop {
-            let msg = self.channel.receive().await?;
-            match msg {
-                Message::Close => {
-                    tracing::warn!("Unexpected close message");
-                    return Err(super::UnexpectedMessageSnafu {
-                        detail: "Unexpected close message"
-                    }.build().into());
-                }
-                Message::Eof => {
-                    tracing::warn!("Unexpected eof message");
-                    return Err(super::UnexpectedMessageSnafu {
-                        detail: "Unexpected eof message"
-                    }.build().into());
-                }
-                Message::Stdout(data) => {
-                    self.read_buf.extend_from_slice(&data[..]);
-                    break Ok(());
-                }
-                Message::Stderr(_) => {
-                    tracing::warn!("Unexpected stderr message");
-                }
-                Message::Exit(status) => {
-                    tracing::info!("Unexpected exit message: {:?}", status);
-                }
-                Message::FlowControl { .. } => {
-                    tracing::info!("Unexpected flow control message");
-                }
-                Message::WindowChange { .. } => {}
-            }
-        }
-    }
-
-    pub async fn fill(&mut self) -> error::Result<&[u8]> {
-        while self.read_buf.is_empty() {
-            self.fill_once().await?;
-        }
-        Ok(&self.read_buf[..])
-    }
-
-    pub async fn fill_exact(&mut self, len: usize) -> error::Result<&[u8]> {
-        if len == 0 {
-            return Ok(&[]);
-        }
-        while self.read_buf.len() < len {
-            self.fill_once().await?;
-        }
-
-        Ok(&self.read_buf[..len])
-    }
-
-    pub async fn read_line_lf(&mut self) -> error::Result<&[u8]> {
-        let mut pos = 0;
-        loop {
-            for i in pos..self.read_buf.len() {
-                if self.read_buf[i] == b'\n' {
-                    return Ok(&self.read_buf[..=i]);
-                }
-            }
-            pos = self.read_buf.len();
-            self.fill_once().await?;
-        }
-    }
-
-    pub async fn close(self) -> error::Result<()> {
-        self.channel.close().await
     }
 }

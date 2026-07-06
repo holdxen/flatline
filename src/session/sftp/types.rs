@@ -228,7 +228,7 @@ impl FileInfo {
 }
 
 #[derive(derive_more::Debug, Clone)]
-pub enum Payload {
+pub(super) enum Payload {
     Status {
         status: Status,
         error: String,
@@ -294,7 +294,7 @@ impl PermissionsAndFileType {
 }
 
 #[derive(Debug, Clone)]
-pub struct Message {
+pub(super) struct Message {
     pub id: u32,
     pub payload: Payload,
 }
@@ -381,16 +381,6 @@ pub struct Attributes {
 }
 
 impl Attributes {
-
-    fn new_with_permissions(permissions: Permissions, file_type: FileType) -> Self {
-        Self {
-            size: None,
-            user: None,
-            property: Some(PermissionsAndFileType::new(permissions, file_type)),
-            time: None,
-            extend: None,
-        }
-    }
 
     fn new(
         size: Option<u64>,

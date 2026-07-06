@@ -1,11 +1,11 @@
 use crate::error;
-use crate::session::channel::{self, BufferChannel, Channel};
+use crate::session::channel::{BufferChannel, Channel};
 use crate::ssh::buffer::Consumer;
 use crate::ssh::buffer::*;
 use crate::ssh::msg;
 use crate::ssh::protocol::SFTPExtension;
 use crate::ssh::protocol::sftp::*;
-use snafu::{ResultExt, Snafu};
+use snafu::ResultExt;
 use std::collections::HashMap;
 
 mod types;

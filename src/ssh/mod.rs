@@ -1,11 +1,10 @@
 #[macro_use]
-pub mod buffer;
+pub(crate) mod buffer;
 pub mod msg;
-pub mod stream;
+pub(crate) mod stream;
+pub(crate) mod protocol;
 
-pub mod protocol;
-
-pub trait MultiplePrecisionInteger {
+pub(super) trait MultiplePrecisionInteger {
     fn to_integer(&self) -> Vec<u8>;
     fn into_integer(self) -> Vec<u8>;
 }

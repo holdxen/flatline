@@ -127,38 +127,6 @@ algo_list!(
     // ),
 );
 
-struct Never;
-
-impl Mac for Never {
-    fn encrypt_then_mac(&self) -> bool {
-        false
-    }
-
-    fn key_len(&self) -> usize {
-        0
-    }
-
-    fn mac_len(&self) -> usize {
-        0
-    }
-
-    fn initialize(&mut self, _: &[u8]) -> Result<()> {
-        Ok(())
-    }
-
-    fn update(&mut self, _: &[u8]) -> Result<()> {
-        Ok(())
-    }
-
-    fn finalize(&mut self) -> Result<Vec<u8>> {
-        Ok(vec![])
-    }
-
-    fn name(&self) -> &str {
-        "none"
-    }
-}
-
 pub trait Mac {
     fn name(&self) -> &str;
     fn encrypt_then_mac(&self) -> bool;

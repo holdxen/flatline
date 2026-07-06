@@ -1,4 +1,4 @@
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::oneshot;
 
 use crate::{
     error,
@@ -79,6 +79,19 @@ pub(super) enum Event {
         height: u32,
         back: oneshot::Sender<error::Result<()>>,
     },
+    ChannelRequestSignal {
+        channel_id: IdentityPair,
+        want_reply: bool,
+        signal: String,
+        back: oneshot::Sender<error::Result<()>>
+    },
+    ChannelRequestEnv {
+        channel_id: IdentityPair,
+        want_reply: bool,
+        name: String,
+        value: String,
+        back: oneshot::Sender<error::Result<()>>
+    },
     ChannelOpenSFTP {
         initial_window_size: u32,
         maximum_packet_size: u32,
@@ -96,13 +109,15 @@ pub(super) enum Event {
         maximum_packet_size: u32,
         back: oneshot::Sender<error::Result<Channel>>,
     },
-    ChannelOpenForwardTcpIp {
-        channel_id: u32,
-        host: String,
-        port: u16,
-        back: oneshot::Sender<error::Result<Channel>>,
+    ChannelRequestX11 {
+        channel_id: IdentityPair,
+        want_reply: bool,
+        single_connection: bool,
+        protocol: String,
+        cookie: String,
+        screen: u32,
+        back: oneshot::Sender<error::Result<()>>
     },
-    ChannelOpenX11 {},
     ChannelSendData {
         channel_id: IdentityPair,
         data: Vec<u8>,

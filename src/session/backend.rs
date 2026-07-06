@@ -7,11 +7,10 @@ use tokio::sync::{mpsc, oneshot};
 use crate::DEFAULT_CHANNEL_CAPACITY;
 use crate::cipher::Factory;
 use crate::cipher::signature::Signature;
-use crate::error::{Error, builder};
+use crate::error::builder;
 use crate::session::channel::{IdentityPair, TtyOpcode};
 use crate::session::{
-    KeyboardInteractive, Notifier, RequestFailureSnafu, UnexpectedBehaviourSnafu,
-    UnexpectedSendingError, forward,
+    KeyboardInteractive, Notifier, RequestFailureSnafu, UnexpectedBehaviourSnafu, forward,
 };
 use crate::ssh::buffer::Consumer;
 use crate::ssh::msg::{Message, Signal};
@@ -175,7 +174,20 @@ where
         tracing::info!("Handling message: {:?}", msg);
         let mut handled = true;
         match msg {
-            Message::Debug { .. } => {}
+            Message::Debug {
+                always_display,
+                message,
+                language,
+            } => {
+                if !language.is_empty() {
+                    tracing::debug!("Field lanuage should be empty");
+                }
+                if always_display {
+                    tracing::warn!("Debug message from server: {}", message);
+                } else {
+                    tracing::info!("Debug message from server: {}", message);
+                }
+            }
             Message::ExtInfo { extensions } => {
                 if let Some(methods) = extensions.get("server-sig-algs") {
                     let method = match std::str::from_utf8(methods) {
@@ -195,7 +207,9 @@ where
                 }
                 tracing::info!("Extensions: {:?}", extensions);
             }
-            Message::Ignore { .. } => {}
+            Message::Ignore { data } => {
+                tracing::info!("Ignore message: {}", data.len());
+            }
             Message::ServiceAccept { .. } => {
                 handled = false;
             }
@@ -218,7 +232,9 @@ where
                 .build()
                 .into());
             }
-            Message::Unimplemented { .. } => {}
+            Message::Unimplemented { sequence_number } => {
+                tracing::warn!("Unimplemented: {}", sequence_number);
+            }
             Message::AuthenticationBanner { message, language } => {
                 tracing::info!(
                     "UserAuthenticationBanner: message={}, language={}",
@@ -363,9 +379,137 @@ where
             Message::ChannelOpenUnknown { .. } => {}
             Message::RequestSuccess => {}
             Message::RequestFailure => {}
+            Message::ChannelOpenX11 {
+                sender_channel,
+                initial_window_size,
+                maximum_packet_size,
+                originator_address,
+                originator_port,
+            } => {
+                self.handle_channel_open_x11(
+                    sender_channel,
+                    initial_window_size,
+                    maximum_packet_size,
+                    originator_address,
+                    originator_port,
+                )
+                .await?;
+            }
         }
         if !handled {
             self.send_unimplemented().await?;
+        }
+        Ok(())
+    }
+
+    async fn handle_channel_open_x11(
+        &mut self,
+        sender_channel: u32,
+        initial_window_size: u32,
+        maximum_packet_size: u32,
+        originator_address: &str,
+        originator_port: u32,
+    ) -> error::Result<()> {
+        let mut default_initial_window_size = super::Session::DEFAULT_INITIAL_WINDOW_SIZE;
+        let mut default_maximum_packet_size = super::Session::DEFAULT_MAXIMUM_PACKET_SIZE;
+
+        let (forward_sender, forward_receiver) = oneshot::channel();
+
+        let verify = async || {
+            let port = u16::try_from(originator_port)
+                .ok()
+                .context(super::InvalidPortSnafu)?;
+
+            let addr = forward::SocketAddr::new(originator_address.to_string(), port);
+            let accept = self
+                .notifier
+                .x11_forward(
+                    addr,
+                    forward_receiver,
+                    &mut default_initial_window_size,
+                    &mut default_maximum_packet_size,
+                )
+                .await;
+
+            if !accept {
+                return Err(super::RequestFailureSnafu.build().into());
+            }
+
+            error::ok(())
+        };
+
+        if let Err(e) = verify().await {
+            let buffer = make_buffer_without_header! {
+                u8: SSH_MSG_CHANNEL_OPEN_FAILURE,
+                u32: sender_channel,
+                u32: msg::ChannelOpenFailureReason::CONNECT_FAILED.0,
+                one: e.to_string(),
+                one: "" // language
+            };
+
+            self.socket.send_payload(&buffer[..]).await?;
+        }
+
+        // let originator_port = match u16::try_from(originator_port) {
+        //     Ok(v) => v,
+        //     Err(e) => {
+        //         tracing::info!("Invalid forward message from server");
+
+        //         let buffer = make_buffer_without_header! {
+        //             u8: SSH_MSG_CHANNEL_OPEN_FAILURE,
+        //             u32: sender_channel,
+        //             u32: msg::ChannelOpenFailureReason::CONNECT_FAILED.0,
+        //             one: e.to_string(),
+        //             one: "" // language
+        //         };
+
+        //         self.socket.send_payload(&buffer[..]).await?;
+
+        //         return Ok(());
+        //     }
+        // };
+
+        let id = IdentityPair::new(self.next_channel_id(), sender_channel);
+
+        let buffer = make_buffer_without_header! {
+            u8: SSH_MSG_CHANNEL_OPEN_CONFIRMATION,
+            u32: id.server,
+            u32: id.client,
+            u32: default_initial_window_size,
+            u32: default_maximum_packet_size,
+        };
+
+        self.socket.send_payload(&buffer[..]).await?;
+
+        let (sender, receiver) = mpsc::channel(DEFAULT_CHANNEL_CAPACITY);
+
+        let handle = ChannelHandle {
+            client: ChannelEndpoint {
+                id: id.client,
+                initial_window_size: default_initial_window_size,
+                used_window_size: 0,
+                maximum_packet_size: default_maximum_packet_size,
+                closed: false,
+                eof: false,
+            },
+            server: ChannelEndpoint {
+                id: id.server,
+                initial_window_size,
+                used_window_size: 0,
+                maximum_packet_size,
+                closed: false,
+                eof: false,
+            },
+            sender,
+        };
+
+        self.channels.push(handle);
+
+        let channel = channel::Channel::new(id, receiver, self.upgrade_frontend()?);
+
+        if let Err(_) = forward_sender.send(forward::Stream::new(channel)) {
+            tracing::info!("Failed to send forward stream, try to close stream now");
+            self.channel_close(id).await?;
         }
         Ok(())
     }
@@ -653,13 +797,13 @@ where
         Ok(())
     }
 
-    async fn handle_global_request_host_keys_openssh(
-        &mut self,
-        want_reply: bool,
-        host_keys: &[&[u8]],
-    ) -> error::Result<()> {
-        todo!()
-    }
+    // async fn handle_global_request_host_keys_openssh(
+    //     &mut self,
+    //     want_reply: bool,
+    //     host_keys: &[&[u8]],
+    // ) -> error::Result<()> {
+    //     todo!()
+    // }
 
     async fn handle_global_unknown_request(
         &mut self,
@@ -954,15 +1098,15 @@ where
         Ok(())
     }
 
-    async fn send_channel_window_adjust(
-        &mut self,
-        server_id: u32,
-        count: u32,
-    ) -> error::Result<()> {
-        self.socket
-            .send_channel_window_adjust(server_id, count)
-            .await
-    }
+    // async fn send_channel_window_adjust(
+    //     &mut self,
+    //     server_id: u32,
+    //     count: u32,
+    // ) -> error::Result<()> {
+    //     self.socket
+    //         .send_channel_window_adjust(server_id, count)
+    //         .await
+    // }
 
     async fn send_pong(&mut self, data: &[u8]) -> error::Result<()> {
         let buffer = make_buffer_without_header!(
@@ -1065,13 +1209,27 @@ where
                     .await;
                 back.send_tracing(result);
             }
-            Event::ChannelOpenForwardTcpIp {
+            Event::ChannelRequestX11 {
                 channel_id,
-                host,
-                port,
+                want_reply,
+                single_connection,
+                protocol,
+                cookie,
+                screen,
                 back,
-            } => todo!(),
-            Event::ChannelOpenX11 {} => todo!(),
+            } => {
+                let result = self
+                    .channel_request_x11(
+                        channel_id,
+                        want_reply,
+                        single_connection,
+                        &protocol,
+                        &cookie,
+                        screen,
+                    )
+                    .await;
+                back.send_tracing(result);
+            }
             Event::ChannelSendData {
                 channel_id,
                 data,
@@ -1154,7 +1312,12 @@ where
                 want_reply,
                 addr,
                 back,
-            } => {}
+            } => {
+                let result = self
+                    .global_request_cancel_tcp_ip_forward(want_reply, &addr)
+                    .await;
+                back.send_tracing(result);
+            }
             Event::AuthenticateKeyboardInteractive {
                 username,
                 interactive,
@@ -1178,6 +1341,29 @@ where
             }
             Event::ChannelClean { back } => {
                 let result = self.channel_clean().await;
+                back.send_tracing(result);
+            }
+            Event::ChannelRequestSignal {
+                channel_id,
+                want_reply,
+                signal,
+                back,
+            } => {
+                let result = self
+                    .channel_request_signal(channel_id, want_reply, &signal)
+                    .await;
+                back.send_tracing(result);
+            }
+            Event::ChannelRequestEnv {
+                channel_id,
+                want_reply,
+                name,
+                value,
+                back,
+            } => {
+                let result = self
+                    .channel_request_env(channel_id, want_reply, &name, &value)
+                    .await;
                 back.send_tracing(result);
             }
         }
@@ -1215,7 +1401,7 @@ where
             error::ok((listener, originator_port, connected_port))
         };
 
-        let (listener, originator_port, connected_port) = match verify() {
+        let (listener, originator_port, _) = match verify() {
             Ok(v) => v,
             Err(e) => {
                 tracing::info!("Invalid forward message from server");
@@ -1290,22 +1476,17 @@ where
     async fn global_request_cancel_tcp_ip_forward(
         &mut self,
         want_reply: bool,
-        address: String,
-        port: u16,
+        addr: &forward::SocketAddr,
     ) -> error::Result<()> {
-        if self
-            .forward
-            .remove(&forward::SocketAddr::new(address.clone(), port))
-            .is_none()
-        {
+        if self.forward.remove(addr).is_none() {
             tracing::warn!("Maybe forward listener not exists")
         }
 
         let buffer = make_buffer_without_header! {
             u8: SSH_MSG_GLOBAL_REQUEST,
             one: SSH_GLOBAL_REQUEST_TYPE_TCP_IP_FORWARD,
-            one: address,
-            u32: port as u32
+            one: &addr.host,
+            u32: addr.port as u32
         };
 
         self.socket.send_payload(&buffer[..]).await?;
@@ -1322,6 +1503,7 @@ where
         }
         Ok(())
     }
+
     async fn channel_eof(&mut self, id: IdentityPair) -> error::Result<()> {
         let index = self
             .channels
@@ -2006,8 +2188,11 @@ where
                         recipient_channel,
                         reason_code,
                         description,
-                        ..
+                        language,
                     } => {
+                        if !language.is_empty() {
+                            tracing::debug!("Field language should be empty");
+                        }
                         if recipient_channel != client.id {
                             tracing::error!(
                                 "Unexpected channel open failure message: {}",
@@ -2186,7 +2371,11 @@ where
 
         let r#type = signer.name().to_string();
 
-        let method = format!("{}{}", r#type, crate::key::CERT_SUFFIX);
+        let method = if is_certificate {
+            format!("{}{}", r#type, crate::key::CERT_SUFFIX)
+        } else {
+            r#type.clone()
+        };
 
         let buffer = make_buffer_without_header! {
             u8: SSH_MSG_USERAUTH_REQUEST,
