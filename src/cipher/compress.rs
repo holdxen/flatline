@@ -10,8 +10,8 @@ algo_list!(
     new_encode_all,
     new_encode_by_name,
     dyn Encode + Send,
-    "zlib" => ZEncoder::new(true),
-    "zlib@openssh.com" => ZEncoder::new(false),
+    "zlib" => ZEncoder::new("zlib", true),
+    "zlib@openssh.com" => ZEncoder::new("zlib@openssh.com", false),
     "none" => Never::default(),
 );
 
@@ -20,8 +20,8 @@ algo_list!(
     new_decode_all,
     new_decode_by_name,
     dyn Decode + Send,
-    "zlib" => ZDecoder::new(true),
-    "zlib@openssh.com" => ZDecoder::new(false),
+    "zlib" => ZDecoder::new("zlib", true),
+    "zlib@openssh.com" => ZDecoder::new("zlib@openssh.com", false),
     "none" => Never::default(),
 );
 
@@ -34,12 +34,14 @@ pub fn none_decode() -> Factory<dyn Decode + Send> {
 }
 
 pub trait Encode {
+    fn name(&self) -> &str;
     fn compress_in_authentication(&self) -> bool;
     fn update(&mut self, data: &[u8]) -> Result<()>;
     fn finalize(&mut self) -> Result<Vec<u8>>;
 }
 
 pub trait Decode {
+    fn name(&self) -> &str;
     fn compress_in_authentication(&self) -> bool;
     fn update(&mut self, data: &[u8]) -> Result<()>;
     fn finalize(&mut self) -> Result<Vec<u8>>;
@@ -58,6 +60,10 @@ impl Encode for Never {
     fn finalize(&mut self) -> Result<Vec<u8>> {
         Ok(mem::take(&mut self.buf))
     }
+    
+    fn name(&self) -> &str {
+        "none"
+    }
 }
 
 impl Decode for Never {
@@ -73,6 +79,10 @@ impl Decode for Never {
     fn finalize(&mut self) -> Result<Vec<u8>> {
         Ok(mem::take(&mut self.buf))
     }
+    
+    fn name(&self) -> &str {
+        "none"
+    }
 }
 
 #[derive(Default)]
@@ -81,14 +91,16 @@ struct Never {
 }
 
 struct ZEncoder {
+    name: &'static str,
     compress_in_authentication: bool,
     encoder: Compress,
     buf: Vec<u8>,
 }
 
 impl ZEncoder {
-    fn new(compress_in_authentication: bool) -> Self {
+    fn new(name: &'static str, compress_in_authentication: bool) -> Self {
         Self {
+            name,
             compress_in_authentication,
             encoder: Compress::new(Compression::default(), true),
             buf: vec![],
@@ -129,17 +141,23 @@ impl Encode for ZEncoder {
     fn finalize(&mut self) -> Result<Vec<u8>> {
         Ok(mem::take(&mut self.buf))
     }
+    
+    fn name(&self) -> &str {
+        self.name
+    }
 }
 
 struct ZDecoder {
+    name: &'static str,
     compress_in_auth: bool,
     decoder: Decompress,
     buf: Vec<u8>,
 }
 
 impl ZDecoder {
-    fn new(compress_in_auth: bool) -> Self {
+    fn new(name: &'static str, compress_in_auth: bool) -> Self {
         Self {
+            name,
             compress_in_auth,
             decoder: Decompress::new(true),
             buf: vec![],
@@ -212,5 +230,9 @@ impl Decode for ZDecoder {
 
     fn finalize(&mut self) -> Result<Vec<u8>> {
         Ok(mem::take(&mut self.buf))
+    }
+    
+    fn name(&self) -> &str {
+        self.name
     }
 }

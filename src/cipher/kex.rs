@@ -1,4 +1,12 @@
-use crate::ssh::{MultiplePrecisionInteger, buffer::Producer};
+use crate::ssh::{
+    MultiplePrecisionInteger,
+    buffer::Producer,
+    protocol::{
+        SSH_MSG_KEX_DH_GEX_GROUP, SSH_MSG_KEX_DH_GEX_INIT, SSH_MSG_KEX_DH_GEX_REPLY,
+        SSH_MSG_KEX_DH_GEX_REQUEST, SSH_MSG_KEX_ECDH_INIT, SSH_MSG_KEX_ECDH_REPLY,
+        SSH_MSG_KEXDH_INIT, SSH_MSG_KEXDH_REPLY,
+    },
+};
 use libcrux_ml_kem::{MlKemCiphertext, MlKemKeyPair};
 use openssl::{
     bn::{BigNum, BigNumContext},
@@ -22,20 +30,20 @@ algo_list!(
     all,
     new_all,
     new_kex_by_name,
-    Algorithm,
-    "mlkem768x25519-sha256" => Algorithm::Hybrid(Box::new(MlKem768X25519::new())),
-    "curve25519-sha256@libssh.org" => Algorithm::Curve25519(Box::new(Curve25519Impl::curve25519_sha256_libssh())),
-    "curve25519-sha256" => Algorithm::Curve25519(Box::new(Curve25519Impl::curve25519_sha256())),
-    "ecdh-sha2-nistp256" => Algorithm::EllipticCurve(Box::new(EllipticCurveDiffieHellmanImpl::ecdh_sha2_nistp256())),
-    "ecdh-sha2-nistp384" => Algorithm::EllipticCurve(Box::new(EllipticCurveDiffieHellmanImpl::ecdh_sha2_nistp384())),
-    "ecdh-sha2-nistp521" => Algorithm::EllipticCurve(Box::new(EllipticCurveDiffieHellmanImpl::ecdh_sha2_nistp521())),
-    "diffie-hellman-group14-sha256" => Algorithm::Standard(Box::new(StandardDiffieHellmanImpl::dh_group14_sha256())),
-    "diffie-hellman-group16-sha512" => Algorithm::Standard(Box::new(StandardDiffieHellmanImpl::dh_group16_sha512())),
-    "diffie-hellman-group14-sha1" => Algorithm::Standard(Box::new(StandardDiffieHellmanImpl::dh_group14_sha1())),
-    "diffie-hellman-group18-sha512" => Algorithm::Standard(Box::new(StandardDiffieHellmanImpl::dh_group18_sha512())),
-    "diffie-hellman-group-exchange-sha256" => Algorithm::Exchange(Box::new(ExchangeDiffieHellmanImpl::sha256())),
-    "diffie-hellman-group-exchange-sha1" => Algorithm::Exchange(Box::new(ExchangeDiffieHellmanImpl::sha1())),
-    "diffie-hellman-group1-sha1" => Algorithm::Standard(Box::new(StandardDiffieHellmanImpl::dh_group1_sha1())),
+    dyn KeyExchange + Send,
+    "mlkem768x25519-sha256" => MlKem768X25519::new(),
+    "curve25519-sha256@libssh.org" => Curve25519Impl::curve25519_sha256_libssh(),
+    "curve25519-sha256" => Curve25519Impl::curve25519_sha256(),
+    "ecdh-sha2-nistp256" => EllipticCurveDiffieHellmanImpl::ecdh_sha2_nistp256(),
+    "ecdh-sha2-nistp384" => EllipticCurveDiffieHellmanImpl::ecdh_sha2_nistp384(),
+    "ecdh-sha2-nistp521" => EllipticCurveDiffieHellmanImpl::ecdh_sha2_nistp521(),
+    "diffie-hellman-group14-sha256" => StandardDiffieHellmanImpl::dh_group14_sha256(),
+    "diffie-hellman-group16-sha512" => StandardDiffieHellmanImpl::dh_group16_sha512(),
+    "diffie-hellman-group14-sha1" => StandardDiffieHellmanImpl::dh_group14_sha1(),
+    "diffie-hellman-group18-sha512" => StandardDiffieHellmanImpl::dh_group18_sha512(),
+    "diffie-hellman-group-exchange-sha256" => ExchangeDiffieHellmanImpl::sha256(),
+    "diffie-hellman-group-exchange-sha1" => ExchangeDiffieHellmanImpl::sha1(),
+    "diffie-hellman-group1-sha1" => StandardDiffieHellmanImpl::dh_group1_sha1(),
 );
 
 pub struct Information<'a> {
@@ -49,14 +57,42 @@ pub struct Information<'a> {
     pub secret_key: &'a [u8],
 }
 
-pub enum Algorithm {
-    Standard(Box<dyn StandardDiffieHellman + Send>),
-    Exchange(Box<dyn ExchangeDiffieHellman + Send>),
-    EllipticCurve(Box<dyn EllipticCurveDiffieHellman + Send>),
-    Curve25519(Box<dyn Curve25519 + Send>),
-    Streamlined(Box<dyn Streamlined + Send>),
-    Hybrid(Box<dyn Hybrid + Send>),
-}
+// pub enum Algorithm {
+//     Standard(Box<dyn StandardDiffieHellman + Send>),
+//     Exchange(Box<dyn ExchangeDiffieHellman + Send>),
+//     EllipticCurve(Box<dyn EllipticCurveDiffieHellman + Send>),
+//     Curve25519(Box<dyn Curve25519 + Send>),
+//     Streamlined(Box<dyn Streamlined + Send>),
+//     Hybrid(Box<dyn Hybrid + Send>),
+// }
+
+// impl Algorithm {
+//     pub fn as_super(&self) -> &dyn KeyExchange {
+//         match self {
+//             Algorithm::Standard(standard_diffie_hellman) => &**standard_diffie_hellman,
+//             Algorithm::Exchange(exchange_diffie_hellman) => &**exchange_diffie_hellman,
+//             Algorithm::EllipticCurve(elliptic_curve_diffie_hellman) => &**elliptic_curve_diffie_hellman,
+//             Algorithm::Curve25519(curve25519) => &**curve25519,
+//             Algorithm::Streamlined(streamlined) => &**streamlined,
+//             Algorithm::Hybrid(hybrid) => &**hybrid,
+//         }
+//     }
+// }
+
+// pub trait KeyExchange {
+//     fn name(&self) -> &str;
+//     fn generate_key(&mut self) -> Result<Vec<u8>>;
+//     fn compute_secret_key(&mut self, server_public_key: &[u8]) -> Result<Vec<u8>>;
+//     fn compute_hash(&mut self, info: Information<'_>) -> Result<Vec<u8>>;
+//     fn compute_communicate_key(
+//         &self,
+//         secret_key: &[u8],
+//         session_id: &[u8],
+//         hash: &[u8],
+//         version: u8,
+//         len: usize,
+//     ) -> Result<Vec<u8>>;
+// }
 
 pub trait KeyExchange {
     fn name(&self) -> &str;
@@ -71,21 +107,34 @@ pub trait KeyExchange {
         version: u8,
         len: usize,
     ) -> Result<Vec<u8>>;
+    fn request_code(&self) -> u8;
+    fn response_code(&self) -> u8;
+    fn exchange(&mut self) -> Option<&mut (dyn Exchange + Send)>;
 }
 
-pub trait StandardDiffieHellman: KeyExchange {}
-pub trait ExchangeDiffieHellman: KeyExchange {
+pub trait Exchange {
     fn max(&self) -> u32;
     fn min(&self) -> u32;
     fn number_of_bits(&self) -> u32;
     fn set_recommended_number_of_bits(&mut self, bits: u32);
     fn initialize(&mut self, p: &[u8], g: &[u8]) -> Result<()>;
+    fn request_code(&self) -> u8;
+    fn response_code(&self) -> u8;
 }
 
-pub trait EllipticCurveDiffieHellman: KeyExchange {}
-pub trait Curve25519: KeyExchange {}
-pub trait Streamlined: KeyExchange {}
-pub trait Hybrid: KeyExchange {}
+// pub trait StandardDiffieHellman: KeyExchange {}
+// pub trait ExchangeDiffieHellman: KeyExchange {
+//     fn max(&self) -> u32;
+//     fn min(&self) -> u32;
+//     fn number_of_bits(&self) -> u32;
+//     fn set_recommended_number_of_bits(&mut self, bits: u32);
+//     fn initialize(&mut self, p: &[u8], g: &[u8]) -> Result<()>;
+// }
+
+// pub trait EllipticCurveDiffieHellman: KeyExchange {}
+// pub trait Curve25519: KeyExchange {}
+// pub trait Streamlined: KeyExchange {}
+// pub trait Hybrid: KeyExchange {}
 
 pub struct EllipticCurveDiffieHellmanImpl {
     name: &'static str,
@@ -116,8 +165,6 @@ impl EllipticCurveDiffieHellmanImpl {
         Self::new("ecdh-sha2-nistp521", Nid::SECP521R1, Md::sha512())
     }
 }
-
-impl EllipticCurveDiffieHellman for EllipticCurveDiffieHellmanImpl {}
 
 impl KeyExchange for EllipticCurveDiffieHellmanImpl {
     fn name(&self) -> &str {
@@ -196,6 +243,18 @@ impl KeyExchange for EllipticCurveDiffieHellmanImpl {
     ) -> Result<Vec<u8>> {
         compute_keys(self.hasher, secret_key, session_id, hash, version, len)
     }
+
+    fn request_code(&self) -> u8 {
+        SSH_MSG_KEX_ECDH_INIT
+    }
+
+    fn response_code(&self) -> u8 {
+        SSH_MSG_KEX_ECDH_REPLY
+    }
+
+    fn exchange(&mut self) -> Option<&mut (dyn Exchange + Send)> {
+        None
+    }
 }
 
 pub struct ExchangeDiffieHellmanImpl {
@@ -247,7 +306,7 @@ impl ExchangeDiffieHellmanImpl {
     }
 }
 
-impl ExchangeDiffieHellman for ExchangeDiffieHellmanImpl {
+impl Exchange for ExchangeDiffieHellmanImpl {
     fn max(&self) -> u32 {
         self.max
     }
@@ -288,6 +347,14 @@ impl ExchangeDiffieHellman for ExchangeDiffieHellmanImpl {
 
         self.key = Some(key);
         Ok(())
+    }
+
+    fn request_code(&self) -> u8 {
+        SSH_MSG_KEX_DH_GEX_REQUEST
+    }
+
+    fn response_code(&self) -> u8 {
+        SSH_MSG_KEX_DH_GEX_GROUP
     }
 }
 impl KeyExchange for ExchangeDiffieHellmanImpl {
@@ -379,6 +446,18 @@ impl KeyExchange for ExchangeDiffieHellmanImpl {
     ) -> Result<Vec<u8>> {
         compute_keys(self.hasher, secret_key, session_id, hash, version, len)
     }
+
+    fn request_code(&self) -> u8 {
+        SSH_MSG_KEX_DH_GEX_INIT
+    }
+
+    fn response_code(&self) -> u8 {
+        SSH_MSG_KEX_DH_GEX_REPLY
+    }
+
+    fn exchange(&mut self) -> Option<&mut (dyn Exchange + Send)> {
+        Some(self)
+    }
 }
 
 pub struct StandardDiffieHellmanImpl<'a> {
@@ -405,7 +484,7 @@ impl StandardDiffieHellmanImpl<'static> {
         Self::new(
             "diffie-hellman-group1-sha1",
             &value::P_GROUP1_VALUE,
-            2,
+            value::G_VALUE,
             Md::sha1(),
         )
     }
@@ -413,7 +492,7 @@ impl StandardDiffieHellmanImpl<'static> {
         Self::new(
             "diffie-hellman-group14-sha1",
             &value::P_GROUP14_VALUE,
-            2,
+            value::G_VALUE,
             Md::sha1(),
         )
     }
@@ -421,7 +500,7 @@ impl StandardDiffieHellmanImpl<'static> {
         Self::new(
             "diffie-hellman-group14-sha256",
             &value::P_GROUP14_VALUE,
-            2,
+            value::G_VALUE,
             Md::sha256(),
         )
     }
@@ -437,7 +516,7 @@ impl StandardDiffieHellmanImpl<'static> {
         Self::new(
             "diffie-hellman-group16-sha512",
             &value::P_GROUP16_VALUE,
-            2,
+            value::G_VALUE,
             Md::sha512(),
         )
     }
@@ -467,7 +546,6 @@ impl StandardDiffieHellmanImpl<'static> {
     }
 }
 
-impl<'a> StandardDiffieHellman for StandardDiffieHellmanImpl<'a> {}
 impl<'a> KeyExchange for StandardDiffieHellmanImpl<'a> {
     fn generate_key(&mut self) -> Result<Vec<u8>> {
         let p = BigNum::from_slice(self.p).context(builder::OpenSSL)?;
@@ -565,6 +643,18 @@ impl<'a> KeyExchange for StandardDiffieHellmanImpl<'a> {
         compute_keys(self.hasher, secret_key, session_id, hash, version, len)
     }
 
+    fn request_code(&self) -> u8 {
+        SSH_MSG_KEXDH_INIT
+    }
+
+    fn response_code(&self) -> u8 {
+        SSH_MSG_KEXDH_REPLY
+    }
+
+    fn exchange(&mut self) -> Option<&mut (dyn Exchange + Send)> {
+        None
+    }
+
     // fn compute_communicate_key(
     //     &self,
     //     secret_key: &[u8],
@@ -633,8 +723,6 @@ impl Curve25519Impl {
         Self::new("curve25519-sha256@libssh.org", Md::sha256())
     }
 }
-
-impl Curve25519 for Curve25519Impl {}
 
 impl KeyExchange for Curve25519Impl {
     fn name(&self) -> &str {
@@ -709,14 +797,24 @@ impl KeyExchange for Curve25519Impl {
     ) -> Result<Vec<u8>> {
         compute_keys(self.hasher, secret_key, session_id, hash, version, len)
     }
+
+    fn request_code(&self) -> u8 {
+        SSH_MSG_KEX_ECDH_INIT
+    }
+
+    fn response_code(&self) -> u8 {
+        SSH_MSG_KEX_ECDH_REPLY
+    }
+
+    fn exchange(&mut self) -> Option<&mut (dyn Exchange + Send)> {
+        None
+    }
 }
 
 pub struct MlKem768X25519 {
     mlkem: Option<MlKemKeyPair<2400, 1184>>,
     x25519: Option<PKey<Private>>,
 }
-
-impl Hybrid for MlKem768X25519 {}
 
 impl MlKem768X25519 {
     fn new() -> Self {
@@ -841,6 +939,18 @@ impl KeyExchange for MlKem768X25519 {
         len: usize,
     ) -> Result<Vec<u8>> {
         compute_keys(Md::sha256(), secret_key, session_id, hash, version, len)
+    }
+
+    fn request_code(&self) -> u8 {
+        SSH_MSG_KEX_ECDH_INIT
+    }
+
+    fn response_code(&self) -> u8 {
+        SSH_MSG_KEX_ECDH_REPLY
+    }
+
+    fn exchange(&mut self) -> Option<&mut (dyn Exchange + Send)> {
+        None
     }
 }
 

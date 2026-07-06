@@ -4,32 +4,31 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-async-trait = "0.1.89"
+async-trait = "0.1"
 bcrypt-pbkdf = "0.11"
-bytes = "1.12.0"
+bytes = "1.12"
 cfg-if = "1.0.4"
-derive_more = { version = "2.1.1", features = ["debug"] }
+derive_more = { version = "2.1", features = ["debug"] }
 easy-ext = "1.0.3"
 flate2 = { version = "1.1.9", features = ["zlib-rs"] }
 indexmap = "2"
 libcrux-ml-kem = "0.0.9"
-num-bigint = "0.4.6"
 openssl = "0.10"
-rand = { version = "0.10.1", features = ["thread_rng"] }
-regex = "1.12.4"
-snafu = "0.9.1"
-tokio = { version = "1", features = ["macros", "net", "sync", "io-util", "rt"] }
-tracing = { version = "0.1.44" }
+rand = { version = "0.10", features = ["thread_rng"] }
+regex = "1.12"
+snafu = "0.9"
+tokio = { version = "1", features = ["macros", "sync", "io-util", "rt"] }
+tracing = { version = "0.1" }
 umac = { git = "https://github.com/holdxen/umac.git", rev = "2571a82984d0c928276006f292635369ddaf6c24", optional = true }
-serde = { version = "1.0.228", features = ["derive"] }
-shlex = "2.0.1"
-bitflags = "2.13.0"
-num_enum = "0.7.6"
+shlex = "2.0"
+bitflags = "2.13"
+num_enum = "0.7"
+async-recursion = "1.1.1"
 
 [dev-dependencies]
 anyhow = { version = "1.0.103", features = ["backtrace"] }
 hex = "0.4.3"
-serde = "1.0.228"
+serde = { version = "1.0.228", features = ["derive"] }
 tempfile = "3.27.0"
 tokio = { version = "1", features = ["full"] }
 toml = "1.1.2"

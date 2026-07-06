@@ -296,7 +296,7 @@ mod test {
         session.request_authentication().await?;
         config.authenticate_password(&session).await?;
 
-        let mut file = vec![0; 8 * 1024];
+        let mut file = vec![0; 16 * 1024];
 
         openssl::rand::rand_bytes(&mut file[..])?;
 

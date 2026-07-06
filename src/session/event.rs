@@ -1,10 +1,10 @@
 use tokio::sync::oneshot;
 
+use crate::session::{InteractiveMethod, KeyboardInteractive, forward};
 use crate::{
     error,
     session::channel::{Channel, IdentityPair, TtyOpcode},
 };
-use crate::session::{forward, InteractiveMethod, KeyboardInteractive};
 
 pub(super) enum Event {
     AuthenticateNone {
@@ -83,14 +83,14 @@ pub(super) enum Event {
         channel_id: IdentityPair,
         want_reply: bool,
         signal: String,
-        back: oneshot::Sender<error::Result<()>>
+        back: oneshot::Sender<error::Result<()>>,
     },
     ChannelRequestEnv {
         channel_id: IdentityPair,
         want_reply: bool,
         name: String,
         value: String,
-        back: oneshot::Sender<error::Result<()>>
+        back: oneshot::Sender<error::Result<()>>,
     },
     ChannelOpenSFTP {
         initial_window_size: u32,
@@ -116,7 +116,7 @@ pub(super) enum Event {
         protocol: String,
         cookie: String,
         screen: u32,
-        back: oneshot::Sender<error::Result<()>>
+        back: oneshot::Sender<error::Result<()>>,
     },
     ChannelSendData {
         channel_id: IdentityPair,
@@ -138,11 +138,19 @@ pub(super) enum Event {
         addr: forward::SocketAddr,
         initial_window_size: u32,
         maximum_packet_size: u32,
-        back: oneshot::Sender<error::Result<forward::Listener>>
+        back: oneshot::Sender<error::Result<forward::Listener>>,
     },
     GlobalRequestCancelTcpIpForward {
         want_reply: bool,
         addr: forward::SocketAddr,
-        back: oneshot::Sender<error::Result<()>>
-    }
+        back: oneshot::Sender<error::Result<()>>,
+    },
+    Renegotiate {
+        back: oneshot::Sender<error::Result<()>>,
+    },
+    Disconnect {
+        reason: u32,
+        description: String,
+        back: oneshot::Sender<error::Result<()>>,
+    },
 }

@@ -97,4 +97,4 @@ pub enum Error {
     KeyLengthMismatch,
 }
 
-pub type Factory<T> = Box<dyn Fn() -> Box<T> + Send + Sync>;
+pub type Factory<T> = Box<dyn (Fn() -> Box<T>) + Send + Sync>;

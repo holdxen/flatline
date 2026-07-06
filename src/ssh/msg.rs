@@ -477,7 +477,7 @@ impl<'a> Message<'a> {
                             originator_port,
                         })
                     }
-                    SSH_CHANNEL_TYPE_SESSION | openssh::SSH_CHANNEL_TYPE_AGENT_CONNECT => {
+                    SSH_CHANNEL_TYPE_AGENT_CONNECT | openssh::SSH_CHANNEL_TYPE_AGENT_CONNECT => {
                         let sender_channel = consumer.consume_u32()?;
                         let initial_window_size = consumer.consume_u32()?;
                         let maximum_packet_size = consumer.consume_u32()?;
@@ -525,10 +525,7 @@ impl<'a> Message<'a> {
             }
             SSH_MSG_REQUEST_SUCCESS => Ok(Self::RequestSuccess),
             SSH_MSG_REQUEST_FAILURE => Ok(Self::RequestFailure),
-            code => Ok(Message::UnrecognizedMessage {
-                code,
-                data: consumer.peek(),
-            }),
+            code => Ok(Message::UnrecognizedMessage { code, data }),
         }
     }
 }

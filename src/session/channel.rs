@@ -1149,9 +1149,6 @@ impl BufferChannel {
     }
 
     pub async fn fill_exact(&mut self, len: usize) -> error::Result<&[u8]> {
-        if len == 0 {
-            return Ok(&[]);
-        }
         while self.read_buf.len() < len {
             self.fill_once().await?;
         }

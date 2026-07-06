@@ -1,12 +1,9 @@
-use indexmap::IndexMap;
 use snafu::{OptionExt, ResultExt};
 use std::collections::HashMap;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::DEFAULT_CHANNEL_CAPACITY;
-use crate::cipher::Factory;
-use crate::cipher::signature::Signature;
 use crate::error::builder;
 use crate::session::channel::{IdentityPair, TtyOpcode};
 use crate::session::{
@@ -77,22 +74,6 @@ impl ChannelEndpoint {
     }
 }
 
-pub struct SessionInner<T, N>
-where
-    T: AsyncRead + AsyncWrite + Unpin + Send,
-{
-    session_id: Vec<u8>,
-    socket: CipherStream<T>,
-    receiver: mpsc::Receiver<Event>,
-    channels: Vec<ChannelHandle>,
-    signer: IndexMap<String, Factory<dyn Signature + Send>>,
-    server_algorithms: Vec<String>,
-    server_ping_supported: bool,
-    forward: HashMap<forward::SocketAddr, ListenerHandle>,
-    frontend: mpsc::WeakSender<Event>,
-    notifier: N,
-}
-
 #[easy_ext::ext]
 impl<T> CipherStream<T>
 where
@@ -139,15 +120,60 @@ impl<T> oneshot::Sender<T> {
     }
 }
 
+pub struct SessionInner<T, N>
+where
+    T: AsyncRead + AsyncWrite + Unpin + Send,
+{
+    session_id: Vec<u8>,
+    socket: CipherStream<T>,
+    receiver: mpsc::Receiver<Event>,
+    config: super::Config,
+    client_version: String,
+    server_version: String,
+    frontend: mpsc::WeakSender<Event>,
+    notifier: N,
+    channels: Vec<ChannelHandle>,
+    server_algorithms: Vec<String>,
+    server_ping_supported: bool,
+    forward: HashMap<forward::SocketAddr, ListenerHandle>,
+    renegotiating: bool,
+}
+
 impl<T, N> SessionInner<T, N>
 where
     T: AsyncRead + AsyncWrite + Unpin + Send,
 {
+    pub fn session_id(&self) -> &[u8] {
+        &self.session_id
+    }
+
+    pub fn config(&self) -> &super::Config {
+        &self.config
+    }
+
+    pub fn notifier_mut(&mut self) -> &mut N {
+        &mut self.notifier
+    }
+
+    pub fn socket_mut(&mut self) -> &mut CipherStream<T> {
+        &mut self.socket
+    }
+
+    pub fn server_version(&self) -> &str {
+        &self.server_version
+    }
+
+    pub fn client_version(&self) -> &str {
+        &self.client_version
+    }
+
     pub(super) fn new(
         session_id: Vec<u8>,
         socket: CipherStream<T>,
         notifier: N,
-        signer: IndexMap<String, Factory<dyn Signature + Send>>,
+        client_version: String,
+        server_version: String,
+        config: super::Config,
         receiver: mpsc::Receiver<Event>,
         frontend: mpsc::WeakSender<Event>,
     ) -> Self {
@@ -156,21 +182,24 @@ where
             socket,
             receiver,
             channels: Default::default(),
-            signer,
+            config,
             server_algorithms: Default::default(),
             server_ping_supported: false,
             forward: Default::default(),
             frontend,
             notifier,
+            client_version,
+            server_version,
+            renegotiating: false,
         }
     }
 }
 impl<T, N> SessionInner<T, N>
 where
     T: AsyncRead + AsyncWrite + Unpin + Send,
-    N: Notifier,
+    N: Notifier + Send,
 {
-    async fn handle_msg(&mut self, msg: Message<'_>) -> error::Result<()> {
+    pub async fn handle_msg(&mut self, msg: Message<'_>) -> error::Result<()> {
         tracing::info!("Handling message: {:?}", msg);
         let mut handled = true;
         match msg {
@@ -241,6 +270,14 @@ where
                     message,
                     language
                 );
+            }
+            Message::UnrecognizedMessage {
+                code: SSH_MSG_KEXINIT,
+                data,
+            } if !self.renegotiating => {
+                self.renegotiating = true;
+                self.renegotiate(Some(data.to_vec())).await?;
+                self.renegotiating = false;
             }
             Message::UnrecognizedMessage { code, .. } => {
                 tracing::warn!("Unrecognized message: {}", code);
@@ -402,6 +439,23 @@ where
         Ok(())
     }
 
+    async fn disconnect(&mut self, reason: u32, description: &str) -> error::Result<()> {
+        let buffer = make_buffer_without_header! {
+            u8: SSH_MSG_DISCONNECT,
+            u32: reason,
+            one: description,
+            u32: 0
+        };
+        self.socket.send_payload(&buffer[..]).await
+    }
+
+    #[async_recursion::async_recursion]
+    async fn renegotiate(&mut self, msg: Option<Vec<u8>>) -> error::Result<()> {
+        let mut exchange = super::handshake::RekeyExchange::new(self);
+        exchange.exec(msg).await?;
+        Ok(())
+    }
+
     async fn handle_channel_open_x11(
         &mut self,
         sender_channel: u32,
@@ -553,7 +607,7 @@ where
                     data,
                 } => {
                     // let mut response = async || {
-                    let mut consumer = Consumer::new(data);
+                    let mut consumer = Consumer::new(&data[1..]);
                     let name = consumer.consume_one()?;
                     let name = std::str::from_utf8(name).context(msg::ExpectStringSnafu)?;
 
@@ -1364,6 +1418,18 @@ where
                 let result = self
                     .channel_request_env(channel_id, want_reply, &name, &value)
                     .await;
+                back.send_tracing(result);
+            }
+            Event::Renegotiate { back } => {
+                let result = self.renegotiate(None).await;
+                back.send_tracing(result);
+            }
+            Event::Disconnect {
+                reason,
+                description,
+                back,
+            } => {
+                let result = self.disconnect(reason, &description).await;
                 back.send_tracing(result);
             }
         }
@@ -2332,7 +2398,7 @@ where
         let mut signer = None;
 
         if r#type == "ssh-rsa" {
-            for (k, v) in self.signer.iter() {
+            for (k, v) in self.config.signer.iter() {
                 if rsa.contains(&k.as_str()) {
                     if self.server_algorithms.contains(k) {
                         signer = Some(v());
@@ -2341,12 +2407,12 @@ where
                 }
             }
             if signer.is_none() {
-                if let Some(create) = self.signer.get(rsa[0]) {
+                if let Some(create) = self.config.signer.get(rsa[0]) {
                     signer = Some(create())
                 }
             }
         } else {
-            if let Some(create) = self.signer.get(r#type) {
+            if let Some(create) = self.config.signer.get(r#type) {
                 signer = Some(create())
             }
         }

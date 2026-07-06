@@ -36,8 +36,8 @@ pub enum Error {
 }
 
 pub trait Stream: Send {
-    fn send_payload(&mut self, payload: &[u8]) -> impl Future<Output = error::Result<()>>;
-    fn recv_packet(&mut self) -> impl Future<Output = error::Result<msg::Packet>>;
+    fn send_payload(&mut self, payload: &[u8]) -> impl Future<Output = error::Result<()>> + Send;
+    fn recv_packet(&mut self) -> impl Future<Output = error::Result<msg::Packet>> + Send;
 }
 
 #[derive(Default, Debug)]
@@ -137,10 +137,12 @@ where
             .fail()?;
         }
 
-        let mut rng = rand::rng();
         let mut rand_padding = vec![0u8; padding_len];
 
-        rng.fill(&mut rand_padding);
+        {
+            let mut rng = rand::rng();
+            rng.fill(&mut rand_padding);
+        }
 
         let mut producer = Producer::with_capacity(packet_len + 4);
 
@@ -637,6 +639,26 @@ impl<T> CipherStream<T>
 where
     T: AsyncRead + AsyncWrite + Unpin + Send,
 {
+    pub fn upgrade_client(
+        &mut self, 
+        encrypt: Box<dyn Encrypt + Send>,
+        encode: Box<dyn Encode + Send>,
+        calculator: Box<dyn Mac + Send>
+    ) {
+        self.encrypt = encrypt;
+        self.encode = encode;
+        self.calculator = calculator;
+    }
+    pub fn upgrade_server(
+        &mut self, 
+        decrypt: Box<dyn Decrypt + Send>,
+        decode: Box<dyn Decode + Send>,
+        verify : Box<dyn Mac + Send>
+    ) {
+        self.decrypt = decrypt;
+        self.decode = decode;
+        self.verify = verify;
+    }
     pub fn server(&self) -> &NormalEndpoint {
         &self.server
     }

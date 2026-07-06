@@ -5,6 +5,8 @@ use rand::RngExt;
 use snafu::ResultExt;
 use tokio::io::{AsyncRead, AsyncWrite};
 
+use crate::cipher::signature::Signature;
+use crate::session::Notifier;
 use crate::{
     cipher::{
         Factory,
@@ -23,8 +25,6 @@ use crate::{
     },
     stream::BufferStream,
 };
-use crate::cipher::signature::Signature;
-use crate::session::Notifier;
 
 #[derive(Debug, snafu::Snafu)]
 pub enum Error {
@@ -58,7 +58,7 @@ where
     T: AsyncRead + AsyncWrite + Unpin + Send,
     N: Notifier + Send + 'static,
 {
-    pub version: String,
+    pub client_version: String,
     pub banner: Vec<String>,
     pub config: Config,
     pub notifier: N,
@@ -77,7 +77,7 @@ where
 pub struct Config {
     // pub version: String,
     // pub banner: Vec<String>,
-    pub kex: IndexMap<String, Factory<kex::Algorithm>>,
+    pub kex: IndexMap<String, Factory<dyn KeyExchange + Send>>,
     pub host_key: IndexMap<String, Factory<dyn Verify + Send>>,
     pub crypt_client_to_server: IndexMap<String, Factory<dyn Encrypt + Send>>,
     pub crypt_server_to_client: IndexMap<String, Factory<dyn Decrypt + Send>>,
@@ -90,15 +90,88 @@ pub struct Config {
     pub ext: bool,
 }
 
+#[derive(derive_more::Debug)]
 pub struct MatchedMethods {
-    kex: Box<kex::Algorithm>,
+    #[debug("{}", kex.name())]
+    kex: Box<dyn KeyExchange + Send>,
+    #[debug("{}", host_key.name())]
     host_key: Box<dyn Verify + Send>,
+    #[debug("{}", crypt_client_to_server.name())]
     crypt_client_to_server: Box<dyn Encrypt + Send>,
+    #[debug("{}", crypt_server_to_client.name())]
     crypt_server_to_client: Box<dyn Decrypt + Send>,
+    #[debug("{}", mac_client_to_server.name())]
     mac_client_to_server: Box<dyn Mac + Send>,
+    #[debug("{}", mac_server_to_client.name())]
     mac_server_to_client: Box<dyn Mac + Send>,
+    #[debug("{}", compress_client_to_server.name())]
     compress_client_to_server: Box<dyn Encode + Send>,
+    #[debug("{}", compress_server_to_client.name())]
     compress_server_to_client: Box<dyn Decode + Send>,
+}
+
+impl MatchedMethods {
+    fn initialize(
+        &mut self,
+        hash: &[u8],
+        session_id: &[u8],
+        secret_key: &[u8],
+    ) -> error::Result<()> {
+        let local_iv = self.kex.compute_communicate_key(
+            &secret_key[..],
+            session_id,
+            hash,
+            b'A',
+            self.crypt_client_to_server.iv_len(),
+        )?;
+
+        let local_key = self.kex.compute_communicate_key(
+            &secret_key[..],
+            session_id,
+            hash,
+            b'C',
+            self.crypt_client_to_server.key_len(),
+        )?;
+
+        self.crypt_client_to_server
+            .initialize(&local_iv, &local_key)?;
+
+        let remote_iv = self.kex.compute_communicate_key(
+            &secret_key[..],
+            session_id,
+            hash,
+            b'B',
+            self.crypt_server_to_client.iv_len(),
+        )?;
+        let remote_key = self.kex.compute_communicate_key(
+            &secret_key[..],
+            session_id,
+            hash,
+            b'D',
+            self.crypt_server_to_client.key_len(),
+        )?;
+
+        self.crypt_server_to_client
+            .initialize(&remote_iv, &remote_key)?;
+        let local_key = self.kex.compute_communicate_key(
+            &secret_key[..],
+            session_id,
+            hash,
+            b'E',
+            self.mac_client_to_server.key_len(),
+        )?;
+        let remote_key = self.kex.compute_communicate_key(
+            &secret_key[..],
+            session_id,
+            hash,
+            b'F',
+            self.mac_server_to_client.key_len(),
+        )?;
+        self.mac_client_to_server.initialize(&local_key)?;
+        self.mac_server_to_client.initialize(&remote_key)?;
+
+        Ok(())
+    }
 }
 
 impl Config {
@@ -263,14 +336,14 @@ where
     T: AsyncRead + AsyncWrite + Unpin + Send,
     N: Notifier + Send + 'static,
 {
-    pub fn new(socket: T, notifier: N,  config: Config) -> Self {
-        let version = format!(
+    pub fn new(socket: T, notifier: N, config: Config) -> Self {
+        let client_version = format!(
             "SSH-2.0-{}_{}",
             env!("CARGO_PKG_NAME"),
             env!("CARGO_PKG_VERSION")
         );
         Self {
-            version,
+            client_version,
             banner: vec![],
             config,
             notifier,
@@ -298,7 +371,7 @@ where
             stream.put_bytes(banner);
             stream.put_bytes(protocol::BANNER_ENDING);
         }
-        stream.put_bytes(&self.version);
+        stream.put_bytes(&self.client_version);
         stream.put_bytes(protocol::BANNER_ENDING);
         stream.flush().await.context(builder::IO)?;
         // let mut banner = self.config.banner.join(protocol::BANNER_ENDING);
@@ -336,17 +409,21 @@ where
             if line.starts_with("SSH-") {
                 return if let Some(caps) = re.captures(line) {
                     let version = &caps["version"];
-                    println!("version is:{}", version);
                     if version != "2.0" && version != "1.99" {
                         return Err(UnsupportedVersionSnafu {
                             version: line.to_string(),
                         }
-                            .build()
-                            .into());
+                        .build()
+                        .into());
                     }
                     let software = &caps["software"];
                     let comment = caps.name("comment").map(|v| v.as_str().to_string());
-                    tracing::info!("Server banner: version={}, software={}, comment={:?}", version, software, comment);
+                    tracing::info!(
+                        "Server banner: version={}, software={}, comment={:?}",
+                        version,
+                        software,
+                        comment
+                    );
 
                     self.compat_options = CompatOptions::parse(software);
                     self.server_version = Some(line.to_string());
@@ -360,7 +437,7 @@ where
                     Ok(())
                 } else {
                     Err(UnexpectedServerBannerSnafu { banner: line }.build().into())
-                }
+                };
             }
 
             lines.push(line.to_string());
@@ -384,6 +461,7 @@ where
 
     pub async fn negotiate_methods(&mut self) -> error::Result<()> {
         let client_methods = Methods::from_config(&self.config);
+        tracing::info!("Client methods: {:?}", client_methods);
 
         let v = client_methods.build();
 
@@ -399,13 +477,18 @@ where
             let mut consumer = Consumer::new(&packet.payload);
             if consumer.consume_u8()? == protocol::SSH_MSG_KEXINIT {
                 let server_method = Methods::parse(&packet.payload)?;
+
+                tracing::info!("Server methods: {:?}", server_method);
+
                 self.plain_stream.as_mut().unwrap().server_mut().kex_strict =
                     server_method.kex_strict;
                 self.plain_stream.as_mut().unwrap().server_mut().ext = server_method.ext;
                 let matched = self.config.negotiate(&server_method)?;
+
+                tracing::info!("Matched methods: {:?}", matched);
+
                 self.matched_methods = Some(matched);
                 self.server_kex_msg = Some(packet.payload);
-                println!("server methods: {:#?}", server_method);
                 break;
             } else {
                 self.plain_stream
@@ -421,122 +504,69 @@ where
 
     pub async fn key_exchange(&mut self) -> error::Result<()> {
         let matched = self.matched_methods.as_mut().unwrap();
-        let mut is_exchange = false;
-        let mut is_curve = false;
-        let kex: &mut dyn KeyExchange = match &mut *matched.kex {
-            kex::Algorithm::Standard(standard_diffie_hellman) => {
-                // let client_public_key = standard_diffie_hellman.generate_key()?;
-                // let mut producer = Producer::default();
-                // producer.put_u8(protocol::SSH_MSG_KEXDH_INIT);
-                // producer.put_one(&client_public_key);
 
-                // self.plain_stream
-                //     .as_mut()
-                //     .unwrap()
-                //     .send_payload(&producer[..])
-                //     .await?;
+        if let Some(exchange) = matched.kex.exchange() {
+            let need = matched
+                .crypt_client_to_server
+                .key_len()
+                .max(matched.crypt_client_to_server.block_size())
+                .max(matched.crypt_client_to_server.iv_len())
+                .max(matched.mac_client_to_server.key_len())
+                .max(matched.crypt_server_to_client.key_len())
+                .max(matched.crypt_server_to_client.block_size())
+                .max(matched.crypt_server_to_client.iv_len())
+                .max(matched.mac_server_to_client.key_len());
 
-                // let packet = self.plain_stream.as_mut().unwrap().recv_packet().await?;
-                &mut **standard_diffie_hellman
+            let need = need * 8;
+            let mut bits = if need <= 112 {
+                2048
+            } else if need <= 128 {
+                3072
+            } else if need <= 192 {
+                7680
+            } else {
+                8192
+            };
+
+            if self.server_version.as_ref().unwrap().contains("Cisco-1") && bits > 4096 {
+                bits = 4096;
             }
-            kex::Algorithm::Exchange(exchange_diffie_hellman) => {
-                //
 
-                let need = matched
-                    .crypt_client_to_server
-                    .key_len()
-                    .max(matched.crypt_client_to_server.block_size())
-                    .max(matched.crypt_client_to_server.iv_len())
-                    .max(matched.mac_client_to_server.key_len())
-                    .max(matched.crypt_server_to_client.key_len())
-                    .max(matched.crypt_server_to_client.block_size())
-                    .max(matched.crypt_server_to_client.iv_len())
-                    .max(matched.mac_server_to_client.key_len());
+            exchange.set_recommended_number_of_bits(bits);
 
-                let need = need * 8;
-                let mut bits = if need <= 112 {
-                    2048
-                } else if need <= 128 {
-                    3072
-                } else if need <= 192 {
-                    7680
+            let mut producer = Producer::default();
+            producer.put_u8(exchange.request_code());
+            producer.put_u32(exchange.min());
+            producer.put_u32(exchange.number_of_bits());
+            producer.put_u32(exchange.max());
+
+            self.plain_stream
+                .as_mut()
+                .unwrap()
+                .send_payload(&producer[..])
+                .await?;
+
+            loop {
+                let packet = self.plain_stream.as_mut().unwrap().recv_packet().await?;
+                let mut consumer = Consumer::new(&packet.payload);
+                if consumer.consume_u8()? == exchange.response_code() {
+                    let p = consumer.consume_one()?;
+                    let g = consumer.consume_one()?;
+                    exchange.initialize(p, g)?;
+                    break;
                 } else {
-                    8192
-                };
-
-                if self.server_version.as_ref().unwrap().contains("Cisco-1") && bits > 4096 {
-                    bits = 4096;
+                    self.plain_stream
+                        .as_mut()
+                        .unwrap()
+                        .handle_msg(packet)
+                        .await?;
                 }
-
-                exchange_diffie_hellman.set_recommended_number_of_bits(bits);
-
-                let mut producer = Producer::default();
-                producer.put_u8(protocol::SSH_MSG_KEX_DH_GEX_REQUEST);
-                producer.put_u32(exchange_diffie_hellman.min());
-                producer.put_u32(exchange_diffie_hellman.number_of_bits());
-                producer.put_u32(exchange_diffie_hellman.max());
-
-                self.plain_stream
-                    .as_mut()
-                    .unwrap()
-                    .send_payload(&producer[..])
-                    .await?;
-
-                loop {
-                    let packet = self.plain_stream.as_mut().unwrap().recv_packet().await?;
-                    let mut consumer = Consumer::new(&packet.payload);
-                    if consumer.consume_u8()? == protocol::SSH_MSG_KEX_DH_GEX_GROUP {
-                        let p = consumer.consume_one()?;
-                        let g = consumer.consume_one()?;
-                        exchange_diffie_hellman.initialize(p, g)?;
-                        break;
-                    } else {
-                        self.plain_stream
-                            .as_mut()
-                            .unwrap()
-                            .handle_msg(packet)
-                            .await?;
-                    }
-                }
-
-                is_exchange = true;
-
-                &mut **exchange_diffie_hellman
             }
-            kex::Algorithm::EllipticCurve(elliptic_curve_diffie_hellman) => {
-                is_curve = true;
-                &mut **elliptic_curve_diffie_hellman
-            }
-            kex::Algorithm::Curve25519(curve25519) => {
-                is_curve = true;
-                &mut **curve25519
-            }
-            kex::Algorithm::Streamlined(streamlined) => {
-                is_curve = true;
-                &mut **streamlined
-            },
-            kex::Algorithm::Hybrid(hybrid) => {
-                is_curve = true;
-                &mut **hybrid
-            }
-        };
+        }
 
-        let (request_code, reply_code) = if is_exchange {
-            (
-                protocol::SSH_MSG_KEX_DH_GEX_INIT,
-                protocol::SSH_MSG_KEX_DH_GEX_REPLY,
-            )
-        } else if is_curve {
-            (
-                protocol::SSH_MSG_KEX_ECDH_INIT,
-                protocol::SSH_MSG_KEX_ECDH_REPLY,
-            )
-        } else {
-            (protocol::SSH_MSG_KEXDH_INIT, protocol::SSH_MSG_KEXDH_REPLY)
-        };
-        let client_public_key = kex.generate_key()?;
+        let client_public_key = matched.kex.generate_key()?;
         let mut producer = Producer::default();
-        producer.put_u8(request_code);
+        producer.put_u8(matched.kex.request_code());
         producer.put_one(&client_public_key);
 
         self.plain_stream
@@ -548,15 +578,15 @@ where
         loop {
             let packet = self.plain_stream.as_mut().unwrap().recv_packet().await?;
             let mut consumer = Consumer::new(&packet.payload);
-            if consumer.consume_u8()? == reply_code {
+            if consumer.consume_u8()? == matched.kex.response_code() {
                 let host_key = consumer.consume_one()?;
                 let server_public_key = consumer.consume_one()?;
                 let signature = consumer.consume_one()?;
 
-                let secret_key = kex.compute_secret_key(server_public_key)?;
+                let secret_key = matched.kex.compute_secret_key(server_public_key)?;
 
                 let info = Information {
-                    client_version: &self.version,
+                    client_version: &self.client_version,
                     server_version: self.server_version.as_ref().unwrap(),
                     client_kex_init: self.client_kex_msg.as_ref().unwrap(),
                     server_kex_init: self.server_kex_msg.as_ref().unwrap(),
@@ -566,7 +596,7 @@ where
                     secret_key: &secret_key,
                 };
 
-                let hash = kex.compute_hash(info)?;
+                let hash = matched.kex.compute_hash(info)?;
 
                 tracing::info!("Using host_key algorithm: {}", matched.host_key.name());
                 matched.host_key.initialize(&host_key)?;
@@ -575,87 +605,21 @@ where
 
                 snafu::ensure!(res, SignatureVerificationFailedSnafu);
 
-                if !self.notifier.verify_server_host_key(matched.host_key.name(), host_key).await {
+                if !self
+                    .notifier
+                    .verify_server_host_key(matched.host_key.name(), host_key)
+                    .await
+                {
                     return Err(ServerHostKeyRejectedByUserSnafu.build().into());
                 }
-
 
                 let secret_key = {
                     let mut p = Producer::default();
                     p.put_one(secret_key);
                     p
                 };
-                // secret_key.put_one(&secret_key[..]);
 
-                // let local_iv = calculate(
-                //     &mut result.hash,
-                //     secret_key.as_ref(),
-                //     &result.session_id,
-                //     &result.client_hash,
-                //     b'A',
-                //     self.client_crypt.iv_len(),
-                // )?;
-
-                {
-                    let hash = &hash;
-                    let session_id = hash;
-
-                    let local_iv = kex.compute_communicate_key(
-                        &secret_key[..],
-                        session_id,
-                        hash,
-                        b'A',
-                        matched.crypt_client_to_server.iv_len(),
-                    )?;
-
-                    let local_key = kex.compute_communicate_key(
-                        &secret_key[..],
-                        session_id,
-                        hash,
-                        b'C',
-                        matched.crypt_client_to_server.key_len(),
-                    )?;
-
-                    matched
-                        .crypt_client_to_server
-                        .initialize(&local_iv, &local_key)?;
-
-                    let remote_iv = kex.compute_communicate_key(
-                        &secret_key[..],
-                        session_id,
-                        hash,
-                        b'B',
-                        matched.crypt_server_to_client.iv_len(),
-                    )?;
-                    let remote_key = kex.compute_communicate_key(
-                        &secret_key[..],
-                        session_id,
-                        hash,
-                        b'D',
-                        matched.crypt_server_to_client.key_len(),
-                    )?;
-
-                    matched
-                        .crypt_server_to_client
-                        .initialize(&remote_iv, &remote_key)?;
-                    let local_key = kex.compute_communicate_key(
-                        &secret_key[..],
-                        session_id,
-                        hash,
-                        b'E',
-                        matched.mac_client_to_server.key_len(),
-                    )?;
-                    let remote_key = kex.compute_communicate_key(
-                        &secret_key[..],
-                        session_id,
-                        hash,
-                        b'F',
-                        matched.mac_server_to_client.key_len(),
-                    )?;
-                    matched.mac_client_to_server.initialize(&local_key)?;
-                    matched.mac_server_to_client.initialize(&remote_key)?;
-                }
-
+                matched.initialize(&hash, &hash, &secret_key[..])?;
 
                 self.session_id = Some(hash);
 
@@ -671,7 +635,10 @@ where
                     if consomuer.consume_u8()? == protocol::SSH_MSG_NEWKEYS {
                         break;
                     } else {
-                        println!("handle msg");
+                        // we have sent new keys, so if we try to handle this message from server, we should use cipher stream to send message to server and use plain stream to receive message.
+                        // But we are not ready, so we have to ignore the message during new keys.
+                        tracing::warn!("Ignore message: {}", packet.payload[0]);
+                        // self.plain_stream.as_mut().unwrap().handle_msg(packet).await?;
                     }
                 }
 
@@ -960,5 +927,384 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send> PlainStream<T> {
         };
         stream.send_payload(&buffer[..]).await?;
         Ok(())
+    }
+}
+
+pub(super) struct RekeyExchange<'a, T, N>
+where
+    T: AsyncRead + AsyncWrite + Unpin + Send,
+    N: super::Notifier,
+{
+    session: &'a mut super::SessionInner<T, N>,
+    client_kex_msg: Option<Vec<u8>>,
+    matched_methods: Option<MatchedMethods>,
+    server_kex_msg: Option<Vec<u8>>,
+}
+
+impl<'a, T, N> RekeyExchange<'a, T, N>
+where
+    T: AsyncRead + AsyncWrite + Unpin + Send,
+    N: super::Notifier + Send,
+{
+    pub fn new(session: &'a mut super::SessionInner<T, N>) -> Self {
+        Self {
+            session,
+            client_kex_msg: None,
+            matched_methods: None,
+            server_kex_msg: None,
+        }
+    }
+
+    pub async fn exec(&mut self, server_kex_msg: Option<Vec<u8>>) -> error::Result<()> {
+        self.negotiate_methods(server_kex_msg).await?;
+        self.key_exchange().await?;
+        Ok(())
+    }
+
+    pub async fn negotiate_methods(
+        &mut self,
+        server_kex_msg: Option<Vec<u8>>,
+    ) -> error::Result<()> {
+        let client_methods = Methods::from_config(self.session.config());
+        tracing::info!("Client methods: {:?}", client_methods);
+
+        {
+            let v = client_methods.build();
+            self.session.socket_mut().send_payload(&v).await?;
+            self.client_kex_msg = Some(v);
+        }
+        if let Some(payload) = server_kex_msg {
+            assert_eq!(payload[0], protocol::SSH_MSG_KEXDH_INIT);
+
+            let server_method = Methods::parse(&payload[1..])?;
+            let matched = self.session.config().negotiate(&server_method)?;
+
+            tracing::info!("Matched methods: {:?}", matched);
+
+            self.matched_methods = Some(matched);
+            self.server_kex_msg = Some(payload);
+        } else {
+            loop {
+                let packet = self.session.socket_mut().recv_packet().await?;
+                let mut consumer = Consumer::new(&packet.payload);
+                if consumer.consume_u8()? == protocol::SSH_MSG_KEXINIT {
+                    let server_method = Methods::parse(&packet.payload)?;
+
+                    tracing::info!("Server methods: {:?}", server_method);
+
+                    let matched = self.session.config().negotiate(&server_method)?;
+
+                    tracing::info!("Matched methods: {:?}", matched);
+
+                    self.matched_methods = Some(matched);
+                    self.server_kex_msg = Some(packet.payload);
+                    break;
+                } else {
+                    let message = Message::parse(&packet.payload)?;
+
+                    self.session.handle_msg(message).await?;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    pub async fn key_exchange(&mut self) -> error::Result<()> {
+        let mut matched = self.matched_methods.take().unwrap();
+
+        if let Some(exchange) = matched.kex.exchange() {
+            let need = matched
+                .crypt_client_to_server
+                .key_len()
+                .max(matched.crypt_client_to_server.block_size())
+                .max(matched.crypt_client_to_server.iv_len())
+                .max(matched.mac_client_to_server.key_len())
+                .max(matched.crypt_server_to_client.key_len())
+                .max(matched.crypt_server_to_client.block_size())
+                .max(matched.crypt_server_to_client.iv_len())
+                .max(matched.mac_server_to_client.key_len());
+
+            let need = need * 8;
+            let mut bits = if need <= 112 {
+                2048
+            } else if need <= 128 {
+                3072
+            } else if need <= 192 {
+                7680
+            } else {
+                8192
+            };
+
+            // if self.server_version.as_ref().unwrap().contains("Cisco-1") && bits > 4096 {
+            //     bits = 4096;
+            // }
+
+            exchange.set_recommended_number_of_bits(bits);
+
+            let mut producer = Producer::default();
+            producer.put_u8(exchange.request_code());
+            producer.put_u32(exchange.min());
+            producer.put_u32(exchange.number_of_bits());
+            producer.put_u32(exchange.max());
+
+            self.session
+                .socket_mut()
+                .send_payload(&producer[..])
+                .await?;
+
+            loop {
+                let packet = self.session.socket_mut().recv_packet().await?;
+                let mut consumer = Consumer::new(&packet.payload);
+                if consumer.consume_u8()? == exchange.response_code() {
+                    let p = consumer.consume_one()?;
+                    let g = consumer.consume_one()?;
+                    exchange.initialize(p, g)?;
+                    break;
+                } else {
+                    let msg = Message::parse(&packet.payload)?;
+                    self.session.handle_msg(msg).await?;
+                }
+            }
+        }
+
+        let client_public_key = matched.kex.generate_key()?;
+        let mut producer = Producer::default();
+        producer.put_u8(matched.kex.request_code());
+        producer.put_one(&client_public_key);
+
+        self.session
+            .socket_mut()
+            .send_payload(&producer[..])
+            .await?;
+
+        loop {
+            let packet = self.session.socket_mut().recv_packet().await?;
+            let mut consumer = Consumer::new(&packet.payload);
+            if consumer.consume_u8()? == matched.kex.response_code() {
+                let host_key = consumer.consume_one()?;
+                let server_public_key = consumer.consume_one()?;
+                let signature = consumer.consume_one()?;
+
+                let secret_key = matched.kex.compute_secret_key(server_public_key)?;
+
+                let info = Information {
+                    client_version: self.session.client_version(),
+                    server_version: self.session.server_version(),
+                    client_kex_init: self.client_kex_msg.as_ref().unwrap(),
+                    server_kex_init: self.server_kex_msg.as_ref().unwrap(),
+                    server_host_key: &host_key,
+                    client_public_key: &client_public_key,
+                    server_public_key,
+                    secret_key: &secret_key,
+                };
+
+                let hash = matched.kex.compute_hash(info)?;
+
+                tracing::info!("Using host_key algorithm: {}", matched.host_key.name());
+
+                matched.host_key.initialize(&host_key)?;
+
+                let res = matched.host_key.verify(signature, &hash)?;
+
+                snafu::ensure!(res, SignatureVerificationFailedSnafu);
+
+                if !self
+                    .session
+                    .notifier_mut()
+                    .verify_server_host_key(matched.host_key.name(), host_key)
+                    .await
+                {
+                    return Err(ServerHostKeyRejectedByUserSnafu.build().into());
+                }
+
+                let secret_key = {
+                    let mut p = Producer::default();
+                    p.put_one(secret_key);
+                    p
+                };
+                // secret_key.put_one(&secret_key[..]);
+
+                // let local_iv = calculate(
+                //     &mut result.hash,
+                //     secret_key.as_ref(),
+                //     &result.session_id,
+                //     &result.client_hash,
+                //     b'A',
+                //     self.client_crypt.iv_len(),
+                // )?;
+
+                matched.initialize(&hash, self.session.session_id(), &secret_key[..])?;
+
+                self.session
+                    .socket_mut()
+                    .send_payload(&[protocol::SSH_MSG_NEWKEYS])
+                    .await?;
+
+                self.session.socket_mut().upgrade_client(
+                    matched.crypt_client_to_server,
+                    matched.compress_client_to_server,
+                    matched.mac_client_to_server,
+                );
+
+                loop {
+                    let packet = self.session.socket_mut().recv_packet().await?;
+                    let mut consomuer = Consumer::new(&packet.payload);
+                    if consomuer.consume_u8()? == protocol::SSH_MSG_NEWKEYS {
+                        self.session.socket_mut().upgrade_server(
+                            matched.crypt_server_to_client,
+                            matched.compress_server_to_client,
+                            matched.mac_server_to_client,
+                        );
+                        break;
+                    } else {
+                        let msg = Message::parse(&packet.payload)?;
+                        self.session.handle_msg(msg).await?;
+                    }
+                }
+
+                break Ok(());
+            } else {
+                let msg = Message::parse(&packet.payload)?;
+                self.session.handle_msg(msg).await?;
+            }
+        }
+    }
+}
+
+pub struct DecryptNothing;
+
+impl Decrypt for DecryptNothing {
+    fn name(&self) -> &str {
+        "nothing"
+    }
+
+    fn iv_len(&self) -> usize {
+        0
+    }
+
+    fn key_len(&self) -> usize {
+        0
+    }
+
+    fn block_size(&self) -> usize {
+        8
+    }
+
+    fn initialize(&mut self, _: &[u8], _: &[u8]) -> error::Result<()> {
+        Ok(())
+    }
+
+    fn update(&mut self, data: &[u8], out: &mut Vec<u8>) -> error::Result<usize> {
+        out.extend_from_slice(data);
+        Ok(data.len())
+    }
+
+    fn finalize(&mut self, _: &mut Vec<u8>) -> error::Result<usize> {
+        Ok(0)
+    }
+
+    fn is_galois_counter_mode(&self) -> bool {
+        false
+    }
+
+    fn tag_len(&self) -> usize {
+        0
+    }
+
+    fn update_sequence_number(&mut self, _: u32) -> error::Result<()> {
+        Ok(())
+    }
+
+    fn additional_authenticated_data(&mut self, _: &mut [u8]) -> error::Result<()> {
+        Ok(())
+    }
+
+    fn authentication_tag(&mut self, _: &[u8]) -> error::Result<()> {
+        Ok(())
+    }
+}
+
+struct EncryptNothing;
+
+impl Encrypt for EncryptNothing {
+    fn name(&self) -> &str {
+        "nothing"
+    }
+
+    fn iv_len(&self) -> usize {
+        0
+    }
+
+    fn key_len(&self) -> usize {
+        0
+    }
+
+    fn block_size(&self) -> usize {
+        8
+    }
+
+    fn initialize(&mut self, _: &[u8], _: &[u8]) -> error::Result<()> {
+        Ok(())
+    }
+
+    fn update(&mut self, data: &[u8], buf: &mut Vec<u8>) -> error::Result<usize> {
+        buf.extend_from_slice(data);
+        Ok(data.len())
+    }
+
+    fn finalize(&mut self, _: &mut Vec<u8>) -> error::Result<usize> {
+        Ok(0)
+    }
+
+    fn is_galois_counter_mode(&self) -> bool {
+        false
+    }
+
+    fn tag_len(&self) -> usize {
+        0
+    }
+
+    fn update_sequence_number(&mut self, _: u32) -> error::Result<()> {
+        Ok(())
+    }
+
+    fn additional_authenticated_data(&mut self, _: &mut [u8]) -> error::Result<()> {
+        Ok(())
+    }
+
+    fn authentication_tag(&mut self, _: &mut [u8]) -> error::Result<()> {
+        Ok(())
+    }
+}
+pub struct MacNothing;
+
+impl Mac for MacNothing {
+    fn name(&self) -> &str {
+        "nothing"
+    }
+
+    fn encrypt_then_mac(&self) -> bool {
+        false
+    }
+
+    fn key_len(&self) -> usize {
+        0
+    }
+
+    fn mac_len(&self) -> usize {
+        0
+    }
+
+    fn initialize(&mut self, _: &[u8]) -> error::Result<()> {
+        Ok(())
+    }
+
+    fn update(&mut self, _: &[u8]) -> error::Result<()> {
+        Ok(())
+    }
+
+    fn finalize(&mut self) -> error::Result<Vec<u8>> {
+        Ok(Default::default())
     }
 }
