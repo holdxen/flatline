@@ -88,6 +88,7 @@ pub struct Config {
     pub signer: IndexMap<String, Factory<dyn Signature + Send>>,
     pub key_strict: bool,
     pub ext: bool,
+    pub disable_compat: bool,
 }
 
 #[derive(derive_more::Debug)]
@@ -301,33 +302,46 @@ impl Default for Config {
             signer: convert(signature::new_signature_all()),
             key_strict: true,
             ext: true,
+            disable_compat: false,
         }
     }
 }
 
 #[derive(Default, Clone, Copy)]
-pub struct CompatOptions {
-    ext_eof: bool,
-    old_forward_addr: bool,
-    bug_signature_type: bool,
-    bug_signature_type74: bool,
-    old_session_id: bool,
-    bug_debug: bool,
-    bug_scanner: bool,
-    old_dhgex: bool,
-    bug_norkey: bool,
-    bug_ext_eof: bool,
-    bug_probe: bool,
-    new_openssh: bool,
-    bug_dynamic_prort: bool,
-    bug_curve25519_pad: bool,
-    bug_hostkeys: bool,
-    bug_dn_gex_large: bool,
+pub(super) struct CompatOptions {
+    pub unsupported_rekey: bool,
+    pub curve25519_pad: bool,
+    pub specify_server_sign_algorithm: bool,
+    pub old_session_id: bool,
+    pub limited_dh_ex: bool,
 }
 
 impl CompatOptions {
-    fn parse(software: &str) -> Self {
-        CompatOptions::default()
+    fn parse(version_suffix: &str) -> Self {
+        let mut options = CompatOptions::default();
+
+        if version_suffix.starts_with("Sun_SSH_1.0") {
+            options.unsupported_rekey = true;
+        }
+
+        if version_suffix.starts_with("OpenSSH_6.5") || version_suffix.starts_with("OpenSSH_6.6") {
+            options.curve25519_pad = true;
+        }
+
+        if version_suffix.starts_with("OpenSSH_7.4") {
+            options.specify_server_sign_algorithm = true;
+        }
+
+        if version_suffix.starts_with("3.0 SecureCRT") || version_suffix.starts_with("1.7 SecureFX")
+        {
+            options.old_session_id = true;
+        }
+
+        if version_suffix.starts_with("Cisco-1.") {
+            options.limited_dh_ex = true;
+        }
+
+        options
     }
 }
 
@@ -362,7 +376,7 @@ where
     pub async fn banner_version_exchange(&mut self) -> error::Result<()> {
         use regex::Regex;
         let re = Regex::new(
-            r"^SSH-(?P<version>2\.0|1\.99)-(?P<software>[\x21-\x2B\x2E-\x7E]+)(?: (?P<comment>[\x20-\x7E]*))?$"
+            r"^SSH-(?P<version>[0-9]+(?:\.[0-9]+)*)-(?P<software>[!-~]+)(?: (?P<comment>[ -~]*))?\r?\n?$"
         ).expect("Invalid reggular expression");
         let stream = self.socket.as_mut().unwrap();
 
@@ -417,7 +431,7 @@ where
                         .into());
                     }
                     let software = &caps["software"];
-                    let comment = caps.name("comment").map(|v| v.as_str().to_string());
+                    let comment = caps.name("comment").map(|v| v.as_str());
                     tracing::info!(
                         "Server banner: version={}, software={}, comment={:?}",
                         version,
@@ -425,7 +439,13 @@ where
                         comment
                     );
 
-                    self.compat_options = CompatOptions::parse(software);
+                    if let Some(comment) = comment {
+                        self.compat_options =
+                            CompatOptions::parse(format!("{} {}", software, comment).as_str());
+                    } else {
+                        self.compat_options = CompatOptions::parse(software);
+                    }
+
                     self.server_version = Some(line.to_string());
                     self.server_banner = Some(lines);
 
@@ -460,7 +480,8 @@ where
     }
 
     pub async fn negotiate_methods(&mut self) -> error::Result<()> {
-        let client_methods = Methods::from_config(&self.config);
+        let mut client_methods = Methods::from_config(&self.config);
+        client_methods.do_compat(!self.config.disable_compat && self.compat_options.curve25519_pad);
         tracing::info!("Client methods: {:?}", client_methods);
 
         let v = client_methods.build();
@@ -528,7 +549,7 @@ where
                 8192
             };
 
-            if self.server_version.as_ref().unwrap().contains("Cisco-1") && bits > 4096 {
+            if !self.config.disable_compat && self.compat_options.limited_dh_ex && bits > 4096 {
                 bits = 4096;
             }
 
@@ -878,6 +899,17 @@ impl Methods {
 
         producer.into_vec()
     }
+
+    fn do_compat(&mut self, compat: bool) {
+        if !compat {
+            return;
+        }
+        let method = "curve25519-sha256@libssh.org";
+        tracing::info!("Remove {}", method);
+        if let Some(index) = self.kex.iter().position(|i| i == method) {
+            self.kex.remove(index);
+        }
+    }
 }
 
 #[easy_ext::ext]
@@ -965,7 +997,10 @@ where
         &mut self,
         server_kex_msg: Option<Vec<u8>>,
     ) -> error::Result<()> {
-        let client_methods = Methods::from_config(self.session.config());
+        let mut client_methods = Methods::from_config(self.session.config());
+
+        client_methods.do_compat(!self.session.config().disable_compat && self.session.compat_options().curve25519_pad);
+        
         tracing::info!("Client methods: {:?}", client_methods);
 
         {
@@ -1036,9 +1071,12 @@ where
                 8192
             };
 
-            // if self.server_version.as_ref().unwrap().contains("Cisco-1") && bits > 4096 {
-            //     bits = 4096;
-            // }
+            if self.session.compat_options().limited_dh_ex
+                && !self.session.config().disable_compat
+                && bits > 4096
+            {
+                bits = 4096;
+            }
 
             exchange.set_recommended_number_of_bits(bits);
 

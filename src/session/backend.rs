@@ -112,7 +112,7 @@ impl<T> oneshot::Sender<T> {
     #[track_caller]
     fn send_tracing(self, v: T) -> Option<T> {
         if let Err(v) = self.send(v) {
-            tracing::error!("Failed to send result back");
+            tracing::warn!("Failed to send result back");
             Some(v)
         } else {
             None
@@ -131,6 +131,7 @@ where
     client_version: String,
     server_version: String,
     frontend: mpsc::WeakSender<Event>,
+    compat_options: super::CompatOptions,
     notifier: N,
     channels: Vec<ChannelHandle>,
     server_algorithms: Vec<String>,
@@ -167,12 +168,17 @@ where
         &self.client_version
     }
 
+    pub fn compat_options(&self) -> &super::CompatOptions {
+        &self.compat_options
+    }
+
     pub(super) fn new(
         session_id: Vec<u8>,
         socket: CipherStream<T>,
         notifier: N,
         client_version: String,
         server_version: String,
+        compat_options: super::CompatOptions,
         config: super::Config,
         receiver: mpsc::Receiver<Event>,
         frontend: mpsc::WeakSender<Event>,
@@ -190,6 +196,7 @@ where
             notifier,
             client_version,
             server_version,
+            compat_options,
             renegotiating: false,
         }
     }
@@ -387,7 +394,13 @@ where
                 self.handle_global_request_keep_alive_openssh(want_reply)
                     .await?;
             }
-            Message::GlobalRequestHostKeysOpenSSH { .. } => {}
+            Message::GlobalRequestHostKeysOpenSSH {
+                want_reply,
+                host_keys,
+            } => {
+                self.handle_global_request_hosts_key_openssh(want_reply, &host_keys)
+                    .await?;
+            }
             Message::GlobalUnknownRequest { want_reply, r#type } => {
                 self.handle_global_unknown_request(want_reply, r#type)
                     .await?;
@@ -436,6 +449,24 @@ where
         if !handled {
             self.send_unimplemented().await?;
         }
+        Ok(())
+    }
+
+    async fn handle_global_request_hosts_key_openssh(
+        &mut self,
+        want_reply: bool,
+        host_keys: &[&[u8]],
+    ) -> error::Result<()> {
+        let accept = self.notifier.server_host_keys(host_keys).await;
+
+        if want_reply {
+            if accept {
+                self.socket.send_payload(&[SSH_MSG_REQUEST_SUCCESS]).await?;
+            } else {
+                self.socket.send_payload(&[SSH_MSG_REQUEST_FAILURE]).await?;
+            }
+        }
+
         Ok(())
     }
 
@@ -2397,10 +2428,20 @@ where
 
         let mut signer = None;
 
+        let compat_server_algorithms = ["rsa-sha2-256".to_string(), "rsa-sha2-512".to_string()];
+
+        let server_algorithms =
+            if !self.config.disable_compat && self.compat_options.specify_server_sign_algorithm {
+                tracing::info!("Using compat algorithms: {:?}", compat_server_algorithms);
+                &compat_server_algorithms[..]
+            } else {
+                &self.server_algorithms[..]
+            };
+
         if r#type == "ssh-rsa" {
             for (k, v) in self.config.signer.iter() {
                 if rsa.contains(&k.as_str()) {
-                    if self.server_algorithms.contains(k) {
+                    if server_algorithms.contains(k) {
                         signer = Some(v());
                         break;
                     }

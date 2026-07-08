@@ -10,6 +10,7 @@ pub trait Notifier {
         r#type: &str,
         host_key: &[u8],
     ) -> impl Future<Output = bool> + Send;
+    fn server_host_keys(&mut self, host_keys: &[&[u8]]) -> impl Future<Output = bool> + Send;
     fn x11_forward(
         &mut self,
         originator: forward::SocketAddr,
@@ -51,5 +52,10 @@ impl Notifier for DefaultNotifier {
     ) -> bool {
         tracing::info!("x11 forward: {:?}", originator);
         false
+    }
+    
+    async fn server_host_keys(&mut self, _: &[&[u8]]) -> bool {
+        tracing::info!("server host keys");
+        true
     }
 }

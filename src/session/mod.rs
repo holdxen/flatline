@@ -11,6 +11,7 @@ pub mod sftp;
 
 pub mod forward;
 
+use handshake::CompatOptions;
 pub use handshake::Config;
 pub use handshake::Error as HandshakeError;
 use handshake::Handshaker;
@@ -41,6 +42,7 @@ fn create<T: AsyncRead + AsyncWrite + Unpin + Send, N>(
     config: Config,
     client_version: String,
     server_version: String,
+    compat_options: CompatOptions,
     // signer: IndexMap<String, Factory<dyn Signature + Send>>,
 ) -> (Session, SessionInner<T, N>) {
     let (sender, receiver) = mpsc::channel(DEFAULT_CHANNEL_CAPACITY);
@@ -50,6 +52,7 @@ fn create<T: AsyncRead + AsyncWrite + Unpin + Send, N>(
         notifier,
         client_version,
         server_version,
+        compat_options,
         config,
         receiver,
         sender.downgrade(),
@@ -407,6 +410,7 @@ impl Session {
             shaker.config,
             shaker.client_version,
             shaker.server_version.take().unwrap(),
+            shaker.compat_options,
         );
 
         tokio::spawn(async move {
