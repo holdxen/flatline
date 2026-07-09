@@ -17,7 +17,7 @@ exclude = [
 [dependencies]
 async-trait = "0.1"
 bcrypt-pbkdf = "0.11"
-bytes = "1.12"
+bytes = "1"
 cfg-if = "1.0.4"
 derive_more = { version = "2.1", features = ["debug"] }
 easy-ext = "1.0.3"
@@ -26,7 +26,7 @@ indexmap = "2"
 libcrux-ml-kem = "0.0.9"
 openssl = "0.10"
 rand = { version = "0.10", features = ["thread_rng"] }
-regex = "1.12"
+regex = "1"
 snafu = "0.9"
 tokio = { version = "1", features = ["macros", "sync", "io-util", "rt"] }
 tracing = { version = "0.1" }
@@ -50,3 +50,8 @@ walkdir = "2.5.0"
 [features]
 umac = ["dep:flatline-umac"]
 strict = []
+openssl-v101 = ["openssl/v101"]
+openssl-v102 = ["openssl/v102"]
+openssl-v110 = ["openssl/v110"]
+openssl-v111 = ["openssl/v111"]
+openssl-vendored = ["openssl/vendored"]
