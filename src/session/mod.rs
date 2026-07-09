@@ -533,45 +533,21 @@ impl Session {
 
 #[cfg(test)]
 mod test {
-    pub const HOST: &str = "10.211.55.4";
-    pub const PORT: u16 = 22;
-    pub const USERNAME: &str = "parallels";
-    pub const PASSWORD: &str = "qwer1234";
-
-    pub const PRIVATE_KEY: &str = ".ssh/id_rsa";
-    pub const PUBLIC_KEY: &str = ".ssh/id_ed25519.pub";
-
-    pub const CERTIFICATE_FILE: &str = ".ssh/id_rsa-cert.pub";
-
     use super::*;
-
-    use indexmap::IndexMap;
-    use rand::RngExt;
-
-    #[easy_ext::ext]
-    impl<K, V> IndexMap<K, V> {
-        fn shuffle(&mut self) {
-            let mut rng = rand::rng();
-
-            // Fisher-Yates shuffle
-            for i in (1..self.len()).rev() {
-                let j = rng.random_range(0..=i);
-                self.swap_indices(i, j);
-            }
-        }
-    }
+    use crate::test::{Config as TestHandle, ShuffleConfig};
 
     #[tokio::test]
-    async fn test_authenticate_keyboard_interactive() {
+    async fn test_authenticate_keyboard_interactive() -> anyhow::Result<()> {
         tracing_subscriber::fmt().init();
-        let tcp = tokio::net::TcpStream::connect((HOST, PORT)).await.unwrap();
-        let session = Session::handshake(tcp, Config::default(), DefaultNotifier::default())
-            .await
-            .unwrap();
-        session.request_authentication().await.unwrap();
 
-        #[derive(Default)]
-        struct KeyboardInteractiveImpl;
+        let handle = TestHandle::load().await?;
+
+        let session = handle.open_session().await?;
+        session.request_authentication().await?;
+
+        struct KeyboardInteractiveImpl {
+            handle: TestHandle,
+        }
 
         #[async_trait::async_trait]
         impl KeyboardInteractive for KeyboardInteractiveImpl {
@@ -587,73 +563,95 @@ mod test {
                     instruction,
                     prompts
                 );
-                Ok(vec![PASSWORD.to_string(); prompts.len()])
+                Ok(vec![
+                    self.handle.authentication.password.clone();
+                    prompts.len()
+                ])
             }
         }
 
         session
             .authenticate_keyboard_interactive(
-                USERNAME,
-                Box::new(KeyboardInteractiveImpl),
+                handle.authentication.username.clone(),
+                Box::new(KeyboardInteractiveImpl { handle }),
                 Default::default(),
             )
-            .await
-            .unwrap();
+            .await?;
+
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_authenticate_public_key() {
+    async fn test_authenticate_public_key() -> anyhow::Result<()> {
         let home = std::env::home_dir().unwrap();
-        let tcp = tokio::net::TcpStream::connect((HOST, PORT)).await.unwrap();
-        let session = Session::handshake(tcp, Config::default(), DefaultNotifier::default())
-            .await
-            .unwrap();
-        session.request_authentication().await.unwrap();
-        let mut result = session.authenticate_none(USERNAME).await.unwrap();
 
-        if !result.success() {
-            let private_key_file = tokio::fs::read(home.join(PRIVATE_KEY)).await.unwrap();
-            let public_key_file = tokio::fs::read(home.join(PUBLIC_KEY)).await.unwrap();
+        let handle = TestHandle::load().await?;
 
-            result = session
-                .authenticate_public_key(USERNAME, &private_key_file, Some(&public_key_file), None)
-                .await
-                .unwrap();
-        }
+        let session = handle.open_session().await?;
+        session.request_authentication().await?;
+        let private_key_file =
+            tokio::fs::read(home.join(handle.authentication.private_key.as_str())).await?;
+        let public_key_file =
+            tokio::fs::read(home.join(handle.authentication.public_key.as_str())).await?;
 
-        assert!(result.success());
+        let passphrase = handle
+            .authentication
+            .passphrase
+            .as_ref()
+            .map(|v| v.as_str());
+
+        let status = session
+            .authenticate_public_key(
+                handle.authentication.username.clone(),
+                private_key_file,
+                Some(public_key_file),
+                passphrase.map(|v| v.as_bytes()),
+            )
+            .await?;
+
+        anyhow::ensure!(status.success(), "Failed to authenticate with public key");
+
+        Ok(())
     }
 
     #[tokio::test]
-    async fn test_authenticate_certificate() {
+    async fn test_authenticate_certificate() -> anyhow::Result<()> {
         let home = std::env::home_dir().unwrap();
-        let tcp = tokio::net::TcpStream::connect((HOST, PORT)).await.unwrap();
-        let session = Session::handshake(tcp, Config::default(), DefaultNotifier::default())
-            .await
-            .unwrap();
-        session.request_authentication().await.unwrap();
-        let mut result = session.authenticate_none(USERNAME).await.unwrap();
 
-        if !result.success() {
-            let private_key_file = tokio::fs::read(home.join(PRIVATE_KEY)).await.unwrap();
-            let public_key_file = tokio::fs::read(home.join(CERTIFICATE_FILE)).await.unwrap();
+        let handle = TestHandle::load().await?;
 
-            result = session
-                .authenticate_public_key(USERNAME, &private_key_file, Some(&public_key_file), None)
-                .await
-                .unwrap();
-        }
+        let session = handle.open_session().await?;
+        session.request_authentication().await?;
+        let private_key_file =
+            tokio::fs::read(home.join(handle.authentication.private_key.as_str())).await?;
+        let public_key_file =
+            tokio::fs::read(home.join(handle.authentication.certificate.as_str())).await?;
 
-        assert!(result.success());
+        let passphrase = handle
+            .authentication
+            .passphrase
+            .as_ref()
+            .map(|v| v.as_str());
+
+        let status = session
+            .authenticate_public_key(
+                handle.authentication.username.clone(),
+                private_key_file,
+                Some(public_key_file),
+                passphrase.map(|v| v.as_bytes()),
+            )
+            .await?;
+
+        anyhow::ensure!(status.success(), "Failed to authenticate with public key");
+
+        Ok(())
     }
 
     #[tokio::test]
     async fn test_renegotiate() -> anyhow::Result<()> {
         tracing_subscriber::fmt::init();
-        let config = crate::test::Config::load().await?;
-        let session = config.open_session().await?;
-        session.request_authentication().await?;
-        config.authenticate_password(&session).await?;
+        let handle = TestHandle::load().await?;
+        let session = handle.open_session_simple().await?;
         session
             .send_debug_message(true, "Start renegotiating")
             .await?;
@@ -676,35 +674,17 @@ mod test {
 
         for _ in 0..999 {
             let mut config = Config::default();
-            config.kex.shuffle();
-            config.host_key.shuffle();
-            config.crypt_client_to_server.shuffle();
-            config.crypt_server_to_client.shuffle();
-            config.mac_server_to_client.shuffle();
-            config.mac_client_to_server.shuffle();
-            config.compress_client_to_server.shuffle();
-            config.compress_server_to_client.shuffle();
-            tracing::info!("host key: {:?}", config.host_key.keys());
-            tracing::info!("kex: {:?}", config.kex.keys());
-            tracing::info!("encrypt: {:?}", config.crypt_client_to_server.keys());
-            tracing::info!("decrypt: {:?}", config.crypt_server_to_client.keys());
-            tracing::info!(
-                "mac_client_to_server: {:?}",
-                config.mac_client_to_server.keys()
-            );
-            tracing::info!(
-                "mac_server_to_client: {:?}",
-                config.mac_server_to_client.keys()
-            );
-            tracing::info!("encode: {:?}", config.compress_client_to_server.keys());
-            tracing::info!("decode: {:?}", config.compress_server_to_client.keys());
+            config.shuffle();
+            tracing::info!("Using config: {:?}", config);
             let session = {
-                let config = crate::test::Config::load().await?;
-                let session = config.open_session().await?;
+                let handle = TestHandle::load().await?;
+                let session = handle.open_session_with_config(config).await?;
                 session.request_authentication().await?;
-                config.authenticate_password(&session).await?;
+                handle.authenticate_password(&session).await?;
                 session
             };
+
+            session.send_debug_message(true, "DEBUG handshake").await?;
 
             session
                 .disconnect(DisconnectReason::BY_APPLICATION, "close")
@@ -713,45 +693,33 @@ mod test {
         Ok(())
     }
 
-    #[tokio::test]
-    async fn test_authenticate_password() {
-        let tcp = tokio::net::TcpStream::connect((HOST, PORT)).await.unwrap();
-        let session = Session::handshake(tcp, Config::default(), DefaultNotifier::default())
-            .await
-            .unwrap();
-        session.request_authentication().await.unwrap();
-        let result = session.authenticate_none(USERNAME).await.unwrap();
-        session
-            .authenticate_password(USERNAME, PASSWORD)
-            .await
-            .unwrap();
-        println!("result: {:?}", result)
+    async fn open_session_simple() -> anyhow::Result<Session> {
+        let config = crate::test::Config::load().await?;
+        let session = config.open_session_simple().await?;
+        Ok(session)
     }
 
     #[tokio::test]
-    async fn test_open_channel() {
-        let session = open_session();
+    async fn test_authenticate_password() -> anyhow::Result<()> {
+        let session = open_session_simple().await?;
         session
-            .await
-            .channel_open(1024 * 1024, 1024 * 4)
-            .await
-            .unwrap();
+            .disconnect(DisconnectReason::BY_APPLICATION, "Close")
+            .await?;
+        Ok(())
     }
 
-    async fn open_session() -> Session {
-        let tcp = tokio::net::TcpStream::connect((HOST, PORT)).await.unwrap();
-        let session = Session::handshake(tcp, Config::default(), DefaultNotifier::default())
-            .await
-            .unwrap();
-        session.request_authentication().await.unwrap();
-        let mut result = session.authenticate_none(USERNAME).await.unwrap();
-        if !result.success() {
-            result = session
-                .authenticate_password(USERNAME, PASSWORD)
-                .await
-                .unwrap();
-        }
-        assert!(result.success());
+    #[tokio::test]
+    async fn test_open_channel() -> anyhow::Result<()> {
+        let session = open_session_simple().await?;
+
+        let channel = session.channel_open_default().await?;
+
+        channel.close().await?;
+
         session
+            .disconnect(DisconnectReason::BY_APPLICATION, "Close")
+            .await?;
+
+        Ok(())
     }
 }

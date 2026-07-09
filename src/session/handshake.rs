@@ -1,3 +1,4 @@
+use std::fmt;
 use std::str::{Utf8Error, from_utf8};
 
 use indexmap::IndexMap;
@@ -75,8 +76,6 @@ where
 }
 
 pub struct Config {
-    // pub version: String,
-    // pub banner: Vec<String>,
     pub kex: IndexMap<String, Factory<dyn KeyExchange + Send>>,
     pub host_key: IndexMap<String, Factory<dyn Verify + Send>>,
     pub crypt_client_to_server: IndexMap<String, Factory<dyn Encrypt + Send>>,
@@ -89,6 +88,54 @@ pub struct Config {
     pub key_strict: bool,
     pub ext: bool,
     pub disable_compat: bool,
+}
+
+struct IndexMapKeys<'a, K, V, S>(&'a IndexMap<K, V, S>);
+
+impl<K, V, S> fmt::Debug for IndexMapKeys<'_, K, V, S>
+where
+    K: fmt::Debug,
+{
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_list().entries(self.0.keys()).finish()
+    }
+}
+
+impl fmt::Debug for Config {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Config")
+            .field("kex", &IndexMapKeys(&self.kex))
+            .field("host_key", &IndexMapKeys(&self.host_key))
+            .field(
+                "crypt_client_to_server",
+                &IndexMapKeys(&self.crypt_client_to_server),
+            )
+            .field(
+                "crypt_server_to_client",
+                &IndexMapKeys(&self.crypt_server_to_client),
+            )
+            .field(
+                "mac_client_to_server",
+                &IndexMapKeys(&self.mac_client_to_server),
+            )
+            .field(
+                "mac_server_to_client",
+                &IndexMapKeys(&self.mac_server_to_client),
+            )
+            .field(
+                "compress_client_to_server",
+                &IndexMapKeys(&self.compress_client_to_server),
+            )
+            .field(
+                "compress_server_to_client",
+                &IndexMapKeys(&self.compress_server_to_client),
+            )
+            .field("signer", &IndexMapKeys(&self.signer))
+            .field("key_strict", &self.key_strict)
+            .field("ext", &self.ext)
+            .field("disable_compat", &self.disable_compat)
+            .finish()
+    }
 }
 
 #[derive(derive_more::Debug)]

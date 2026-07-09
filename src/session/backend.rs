@@ -219,12 +219,15 @@ where
                     tracing::debug!("Field lanuage should be empty");
                 }
                 if always_display {
-                    tracing::warn!("Debug message from server: {}", message);
-                } else {
                     tracing::info!("Debug message from server: {}", message);
+                } else {
+                    tracing::debug!("Debug message from server: {}", message);
                 }
             }
             Message::ExtInfo { extensions } => {
+                if !self.config.ext {
+                    tracing::warn!("We have disable ext, but still go ext message from sever");
+                }
                 if let Some(methods) = extensions.get("server-sig-algs") {
                     let method = match std::str::from_utf8(methods) {
                         Ok(method) => method,
