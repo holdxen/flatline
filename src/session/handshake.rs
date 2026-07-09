@@ -29,26 +29,36 @@ use crate::{
 
 #[derive(Debug, snafu::Snafu)]
 pub enum Error {
+    #[snafu(display("Banner too long"))]
     BannerTooLong,
+    #[snafu(display("Unsupported SSH version: {}", version))]
     UnsupportedVersion {
         version: String,
     },
+    #[snafu(display("Invalid banner: {}", source))]
     InvalidBanner {
         source: Utf8Error,
     },
+    #[snafu(display("Invalid string: {}", source))]
     InvalidString {
         source: Utf8Error,
     },
+    #[snafu(display("Negotiation failed"))]
     NegotiationFailed,
+    #[snafu(display("Signature verification failed"))]
     SignatureVerificationFailed,
+    #[snafu(display("Server host key rejected by user"))]
     ServerHostKeyRejectedByUser,
+    #[snafu(display("Unexpected message in strict mode: code {}", code))]
     UnexpectedMessageInStrictMode {
         code: u8,
     },
+    #[snafu(display("Unexpected disconnect message: {:?} - {}", reason, description))]
     UnexpectedDisconnectMessage {
         reason: DisconnectReason,
         description: String,
     },
+    #[snafu(display("Unexpected server banner: {}", banner))]
     UnexpectedServerBanner {
         banner: String,
     },

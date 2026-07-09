@@ -32,7 +32,7 @@ pub trait Notifier {
     fn exited(&mut self, result: error::Result<()>) -> impl Future<Output = ()> + Send;
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, PartialOrd)]
 pub struct DefaultNotifier;
 
 impl Notifier for DefaultNotifier {

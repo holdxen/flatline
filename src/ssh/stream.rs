@@ -28,10 +28,13 @@ pub enum Error {
     },
     // #[snafu(display("padding length is incorrect"))]
     // PaddingLengthIncorrect,
+    #[snafu(display("Payload is empty"))]
     PayloadIsEmpty,
+    #[snafu(display("Unexpected block size: {}", size))]
     UnexpectBlockSize {
         size: usize,
     },
+    #[snafu(display("MAC verification failed"))]
     MacVerificationFailed,
 }
 

@@ -114,6 +114,7 @@ pub enum Public {
 
 #[derive(snafu::Snafu, Debug)]
 pub enum Error {
+    #[snafu(display("Wrong passphrase"))]
     WrongPassphrase,
 
     #[snafu(display("Unsupported key type: {}", r#type))]
@@ -126,17 +127,21 @@ pub enum Error {
         source: bcrypt_pbkdf::Error,
     },
 
+    #[snafu(display("Format error: {}", detail))]
     FormatError {
         detail: String,
         #[snafu(implicit)]
         location: snafu::Location,
     },
+    #[snafu(display("Unsupported feature: {}", detail))]
     UnsupportedFeature {
         detail: String,
     },
+    #[snafu(display("Unsupported algorithm: {}", detail))]
     UnsupportedAlgorithm {
         detail: String,
     },
+    #[snafu(display("Text error: {}", source))]
     TextError {
         source: Utf8Error,
     },

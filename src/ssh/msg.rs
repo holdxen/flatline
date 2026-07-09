@@ -240,6 +240,7 @@ pub(crate) enum Message<'a> {
 #[derive(Debug, snafu::Snafu)]
 #[snafu(visibility(pub(crate)))]
 pub enum Error {
+    #[snafu(display("Expected string: {}", source))]
     ExpectString { source: Utf8Error },
 }
 

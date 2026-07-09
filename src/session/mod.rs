@@ -98,31 +98,42 @@ pub enum Error {
     UnexpectedBehaviour {
         detail: String,
     },
+    #[snafu(display("Unexpected service: expected {}, got {}", expect, actual))]
     UnexpectedService {
         expect: String,
         actual: String,
     },
+    #[snafu(display("Channel open failure (code {}): {}", reason_code, description))]
     ChannelOpenFailure {
         reason_code: u32,
         description: String,
     },
+    #[snafu(display("Channel failure"))]
     ChannelFailure,
+    #[snafu(display("Channel already open"))]
     ChannelAlreadyOpen,
+    #[snafu(display("Unexpected message: {}", detail))]
     UnexpectedMessage {
         detail: String,
     },
+    #[snafu(display("Disconnected: {:?} - {}", reason, description))]
     Disconnected {
         reason: msg::DisconnectReason,
         description: String,
     },
+    #[snafu(display("Unsupported key type: {}", r#type))]
     UnsupportedKeyType {
         r#type: String,
         #[snafu(implicit)]
         location: snafu::Location,
     },
+    #[snafu(display("Request failure"))]
     RequestFailure,
+    #[snafu(display("Invalid port"))]
     InvalidPort,
+    #[snafu(display("Unexpected channel closed"))]
     UnexpectedChannelClosed,
+    #[snafu(display("Unexpected channel EOF"))]
     UnexpectedChannelEof,
 
     #[snafu(transparent)]
@@ -154,11 +165,13 @@ impl<T> oneshot::Receiver<T> {
     }
 }
 
+#[derive(derive_more::Debug)]
 pub struct Session {
+    #[debug(skip)]
     sender: mpsc::Sender<Event>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AuthenticateResult {
     Success,
     PasswordChangeRequired,

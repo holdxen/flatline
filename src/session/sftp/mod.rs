@@ -50,17 +50,21 @@ pub enum Error {
     UnexpectedMessage {
         code: u8,
     },
+    #[snafu(display("Unknown file type: {}", source))]
     UnknownFileType {
         source: num_enum::TryFromPrimitiveError<types::FileType>,
     },
+    #[snafu(display("Unexpected status {}: {}", status, source))]
     UnexpectedStatus {
         source: num_enum::TryFromPrimitiveError<types::Status>,
         status: u32,
     },
+    #[snafu(display("Mismatch response: expected {}, got {}", expected, got))]
     MismatchResponse {
         expected: u32,
         got: u32,
     },
+    #[snafu(display("Unexpected response"))]
     UnexpectedResponse {},
 }
 

@@ -89,11 +89,17 @@ pub mod signature;
 
 #[derive(Debug, Snafu)]
 pub enum Error {
+    #[snafu(display("Invalid prime"))]
     InvalidPrime,
+    #[snafu(display("Compression error"))]
     CompressError,
+    #[snafu(display("MAC verification failed"))]
     MacVerificationFailed,
+    #[snafu(display("Mismatch key"))]
     MismatchKey,
+    #[snafu(display("Signature verification failed"))]
     SignatureVerificationFailed,
+    #[snafu(display("Key length mismatch"))]
     KeyLengthMismatch,
 }
 

@@ -20,12 +20,15 @@ pub enum Error {
     TransportError {
         source: TransportError,
     },
+    #[snafu(display("IO error: {}", source))]
     IOError {
         source: std::io::Error,
     },
+    #[snafu(display("OpenSSL error: {}", source))]
     OpenSSLError {
         source: openssl::error::ErrorStack,
     },
+    #[snafu(display("Invalid operation: {}", detail))]
     InvalidOperation {
         detail: String,
     },
@@ -49,6 +52,7 @@ pub enum Error {
     KeyError {
         source: crate::key::Error,
     },
+    #[snafu(display("Invalid argument: {}", detail))]
     InvalidArgument {
         detail: String,
     }

@@ -18,9 +18,11 @@ pub enum Error {
     UnexpectedResponse {
         detail: String
     },
+    #[snafu(display("Unexpected error message: {}", source))]
     UnexpectedErrorMessage {
         source: Utf8Error
     },
+    #[snafu(display("Invalid target name: {}", source))]
     InvalidTargetName {
         source: shlex::QuoteError
     }
@@ -120,7 +122,9 @@ impl<'a> FileSender<'a> {
     }
 }
 
+#[derive(derive_more::Debug)]
 pub struct Handle {
+    #[debug(skip)]
     channel: BufferChannel
 }
 

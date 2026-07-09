@@ -216,7 +216,7 @@ where
                 language,
             } => {
                 if !language.is_empty() {
-                    tracing::debug!("Field lanuage should be empty");
+                    tracing::debug!("Field language should be empty");
                 }
                 if always_display {
                     tracing::info!("Debug message from server: {}", message);
@@ -226,7 +226,7 @@ where
             }
             Message::ExtInfo { extensions } => {
                 if !self.config.ext {
-                    tracing::warn!("We have disable ext, but still go ext message from sever");
+                    tracing::warn!("We have disabled ext, but still got ext message from server");
                 }
                 if let Some(methods) = extensions.get("server-sig-algs") {
                     let method = match std::str::from_utf8(methods) {
@@ -555,7 +555,7 @@ where
         let channel = channel::Channel::new(id, receiver, self.upgrade_frontend()?);
 
         if forward_sender.send(forward::Stream::new(channel)).is_err() {
-            tracing::info!("Failed to send forward stream, try to close stream now");
+            tracing::warn!("Failed to send forward stream, closing channel");
             self.channel_close(id).await?;
         }
         Ok(())
@@ -693,7 +693,7 @@ where
         let channel = channel::Channel::new(id, receiver, self.upgrade_frontend()?);
 
         if forward_sender.send(forward::Stream::new(channel)).is_err() {
-            tracing::info!("Failed to send forward stream, try to close stream now");
+            tracing::warn!("Failed to send forward stream, closing channel");
             self.channel_close(id).await?;
         }
         Ok(())
@@ -882,7 +882,7 @@ where
         initial_window_size: u32,
         maximum_packet_size: u32,
     ) -> error::Result<channel::Channel> {
-        tracing::info!("Waiting -1");
+        tracing::info!("Opening SFTP channel");
 
         let channel = self
             .channel_open_session(initial_window_size, maximum_packet_size)
@@ -890,11 +890,11 @@ where
 
         let id = channel.identity();
 
-        tracing::info!("Waiting");
+        tracing::info!("Requesting SFTP subsystem");
 
         self.channel_request_subsystem(id, true, "sftp").await?;
 
-        tracing::info!("Waiting 2");
+        tracing::info!("SFTP channel ready");
 
         Ok(channel)
     }
@@ -1665,7 +1665,7 @@ where
             .await
             .is_err()
         {
-            tracing::info!("Failed to send forward stream, try to close stream now");
+            tracing::warn!("Failed to send forward stream, closing channel");
             self.channel_close(id).await?;
         }
 
