@@ -483,7 +483,7 @@ impl Signature for Dsa<Private> {
 
         signer.update(data).context(builder::OpenSSL)?;
 
-        Ok(signer.sign_to_vec().context(builder::OpenSSL)?)
+        signer.sign_to_vec().context(builder::OpenSSL)
     }
 }
 
@@ -683,6 +683,6 @@ impl Verify for Ecdsa<Public> {
         let mut ctx = PkeyCtx::new(key).context(builder::OpenSSL)?;
 
         ctx.verify_init().context(builder::OpenSSL)?;
-        Ok(ctx.verify(&hash, &signature).context(builder::OpenSSL)?)
+        ctx.verify(&hash, &signature).context(builder::OpenSSL)
     }
 }

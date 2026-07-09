@@ -236,10 +236,10 @@ where
 
                     self.server_algorithms = method.split(',').map(|s| s.to_string()).collect();
                 }
-                if let Some(v) = extensions.get("ping@openssh.com") {
-                    if v == b"0" {
-                        self.server_ping_supported = true;
-                    }
+                if let Some(v) = extensions.get("ping@openssh.com")
+                    && v == b"0"
+                {
+                    self.server_ping_supported = true;
                 }
                 tracing::info!("Extensions: {:?}", extensions);
             }
@@ -278,7 +278,7 @@ where
                     language
                 );
             }
-            Message::UnrecognizedMessage {
+            Message::Unrecognized {
                 code: SSH_MSG_KEXINIT,
                 data,
             } if !self.renegotiating => {
@@ -286,7 +286,7 @@ where
                 self.renegotiate(Some(data.to_vec())).await?;
                 self.renegotiating = false;
             }
-            Message::UnrecognizedMessage { code, .. } => {
+            Message::Unrecognized { code, .. } => {
                 tracing::warn!("Unrecognized message: {}", code);
                 handled = false;
             }
@@ -425,7 +425,18 @@ where
                 )
                 .await?;
             }
-            Message::ChannelOpenAgentConnect { .. } => {}
+            Message::ChannelOpenAgentConnect {
+                sender_channel,
+                initial_window_size,
+                maximum_packet_size,
+            } => {
+                self.handle_channel_open_agent_connect(
+                    sender_channel,
+                    initial_window_size,
+                    maximum_packet_size,
+                )
+                .await?;
+            }
             Message::ChannelOpenUnknown { .. } => {}
             Message::RequestSuccess => {}
             Message::RequestFailure => {}
@@ -448,6 +459,101 @@ where
         }
         if !handled {
             self.send_unimplemented().await?;
+        }
+        Ok(())
+    }
+
+    async fn handle_channel_open_agent_connect(
+        &mut self,
+        sender_channel: u32,
+        initial_window_size: u32,
+        maximum_packet_size: u32,
+    ) -> error::Result<()> {
+        let mut default_initial_window_size = super::Session::DEFAULT_INITIAL_WINDOW_SIZE;
+        let mut default_maximum_packet_size = super::Session::DEFAULT_MAXIMUM_PACKET_SIZE;
+
+        let (forward_sender, forward_receiver) = oneshot::channel();
+
+        let verify = async || {
+            if self
+                .channels
+                .iter()
+                .find(|i| i.server.id == sender_channel)
+                .is_some()
+            {
+                return Err(super::ChannelAlreadyOpenSnafu.build().into());
+            }
+
+            let accept = self
+                .notifier
+                .agent_forward(
+                    forward_receiver,
+                    &mut default_initial_window_size,
+                    &mut default_maximum_packet_size,
+                )
+                .await;
+
+            if !accept {
+                return Err(super::RequestFailureSnafu.build().into());
+            }
+
+            error::ok(())
+        };
+
+        if let Err(e) = verify().await {
+            let buffer = make_buffer_without_header! {
+                u8: SSH_MSG_CHANNEL_OPEN_FAILURE,
+                u32: sender_channel,
+                u32: msg::ChannelOpenFailureReason::CONNECT_FAILED.0,
+                one: e.to_string(),
+                one: "" // language
+            };
+
+            self.socket.send_payload(&buffer[..]).await?;
+            return Ok(());
+        }
+
+        let id = IdentityPair::new(self.next_channel_id(), sender_channel);
+
+        let buffer = make_buffer_without_header! {
+            u8: SSH_MSG_CHANNEL_OPEN_CONFIRMATION,
+            u32: id.server,
+            u32: id.client,
+            u32: default_initial_window_size,
+            u32: default_maximum_packet_size,
+        };
+
+        self.socket.send_payload(&buffer[..]).await?;
+
+        let (sender, receiver) = mpsc::channel(DEFAULT_CHANNEL_CAPACITY);
+
+        let handle = ChannelHandle {
+            client: ChannelEndpoint {
+                id: id.client,
+                initial_window_size: default_initial_window_size,
+                used_window_size: 0,
+                maximum_packet_size: default_maximum_packet_size,
+                closed: false,
+                eof: false,
+            },
+            server: ChannelEndpoint {
+                id: id.server,
+                initial_window_size,
+                used_window_size: 0,
+                maximum_packet_size,
+                closed: false,
+                eof: false,
+            },
+            sender,
+        };
+
+        self.channels.push(handle);
+
+        let channel = channel::Channel::new(id, receiver, self.upgrade_frontend()?);
+
+        if forward_sender.send(forward::Stream::new(channel)).is_err() {
+            tracing::info!("Failed to send forward stream, try to close stream now");
+            self.channel_close(id).await?;
         }
         Ok(())
     }
@@ -505,6 +611,15 @@ where
                 .ok()
                 .context(super::InvalidPortSnafu)?;
 
+            if self
+                .channels
+                .iter()
+                .find(|i| i.server.id == sender_channel)
+                .is_some()
+            {
+                return Err(super::ChannelAlreadyOpenSnafu.build().into());
+            }
+
             let addr = forward::SocketAddr::new(originator_address.to_string(), port);
             let accept = self
                 .notifier
@@ -533,26 +648,8 @@ where
             };
 
             self.socket.send_payload(&buffer[..]).await?;
+            return Ok(());
         }
-
-        // let originator_port = match u16::try_from(originator_port) {
-        //     Ok(v) => v,
-        //     Err(e) => {
-        //         tracing::info!("Invalid forward message from server");
-
-        //         let buffer = make_buffer_without_header! {
-        //             u8: SSH_MSG_CHANNEL_OPEN_FAILURE,
-        //             u32: sender_channel,
-        //             u32: msg::ChannelOpenFailureReason::CONNECT_FAILED.0,
-        //             one: e.to_string(),
-        //             one: "" // language
-        //         };
-
-        //         self.socket.send_payload(&buffer[..]).await?;
-
-        //         return Ok(());
-        //     }
-        // };
 
         let id = IdentityPair::new(self.next_channel_id(), sender_channel);
 
@@ -592,7 +689,7 @@ where
 
         let channel = channel::Channel::new(id, receiver, self.upgrade_frontend()?);
 
-        if let Err(_) = forward_sender.send(forward::Stream::new(channel)) {
+        if forward_sender.send(forward::Stream::new(channel)).is_err() {
             tracing::info!("Failed to send forward stream, try to close stream now");
             self.channel_close(id).await?;
         }
@@ -633,7 +730,7 @@ where
                         allow_methods: allow_methods.into_iter().map(|m| m.to_string()).collect(),
                     });
                 }
-                Message::UnrecognizedMessage {
+                Message::Unrecognized {
                     code: SSH_MSG_USERAUTH_INFO_REQUEST,
                     data,
                 } => {
@@ -966,7 +1063,7 @@ where
             error_message: error_message.to_string(),
         };
 
-        if let Err(_) = channel.sender.send(channel::Message::Exit(status)).await {
+        if channel.sender.send(channel::Message::Exit(status)).await.is_err() {
             tracing::error!("Failed to send exit status");
         }
 
@@ -993,12 +1090,13 @@ where
             return Ok(());
         };
 
-        if let Err(_) = channel
+        if channel
             .sender
             .send(channel::Message::Exit(channel::ExitStatus::Normal(
                 exit_status,
             )))
             .await
+            .is_err()
         {
             tracing::error!("Failed to send exit status");
         }
@@ -1046,10 +1144,11 @@ where
             tracing::warn!("want_reply should be false");
         }
 
-        if let Err(_) = channel
+        if channel
             .sender
             .send(channel::Message::FlowControl { on })
             .await
+            .is_err()
         {
             tracing::error!("Failed to send message");
         }
@@ -1085,8 +1184,7 @@ where
             return Err(builder::InvalidOperation {
                 detail: format!("Channel({}) not found", id.server),
             }
-            .build()
-            .into());
+            .build());
         };
 
         let mut sent = 0;
@@ -1160,7 +1258,7 @@ where
             channel::Message::Stdout(data.to_vec())
         };
 
-        if let Err(_) = channel.sender.send(msg).await {
+        if channel.sender.send(msg).await.is_err() {
             tracing::warn!("Unable to send data to channel({})", client_id);
             return Ok(());
         }
@@ -1555,13 +1653,14 @@ where
 
         let channel = channel::Channel::new(id, receiver, self.upgrade_frontend()?);
 
-        if let Err(_) = listener
+        if listener
             .sender
             .send((
                 forward::Stream::new(channel),
                 forward::SocketAddr::new(originator_address.to_string(), originator_port),
             ))
             .await
+            .is_err()
         {
             tracing::info!("Failed to send forward stream, try to close stream now");
             self.channel_close(id).await?;
@@ -1671,7 +1770,7 @@ where
             return Ok(());
         };
 
-        if let Err(_) = channel.sender.send(channel::Message::Eof).await {
+        if channel.sender.send(channel::Message::Eof).await.is_err() {
             tracing::error!("Failed to send message");
         }
 
@@ -1691,7 +1790,7 @@ where
 
         let channel = &mut self.channels[index];
 
-        if let Err(_) = channel.sender.send(channel::Message::Close).await {
+        if channel.sender.send(channel::Message::Close).await.is_err() {
             tracing::error!("Failed to send message");
         }
 
@@ -2373,7 +2472,7 @@ where
                     allow_methods: allow_methods.into_iter().map(|v| v.to_string()).collect(),
                     partial_success,
                 }),
-                Message::UnrecognizedMessage {
+                Message::Unrecognized {
                     code: SSH_MSG_USERAUTH_PASSWD_CHANGEREQ,
                     ..
                 } => Ok(super::AuthenticateResult::PasswordChangeRequired),
@@ -2440,17 +2539,15 @@ where
 
         if r#type == "ssh-rsa" {
             for (k, v) in self.config.signer.iter() {
-                if rsa.contains(&k.as_str()) {
-                    if server_algorithms.contains(k) {
-                        signer = Some(v());
-                        break;
-                    }
+                if rsa.contains(&k.as_str()) && server_algorithms.contains(k) {
+                    signer = Some(v());
+                    break;
                 }
             }
-            if signer.is_none() {
-                if let Some(create) = self.config.signer.get(rsa[0]) {
-                    signer = Some(create())
-                }
+            if signer.is_none()
+                && let Some(create) = self.config.signer.get(rsa[0])
+            {
+                signer = Some(create())
             }
         } else {
             if let Some(create) = self.config.signer.get(r#type) {
@@ -2510,7 +2607,7 @@ where
                         partial_success,
                         allow_methods: allow_methods.into_iter().map(|v| v.to_string()).collect(),
                     })),
-                    Message::UnrecognizedMessage {
+                    Message::Unrecognized {
                         code: SSH_MSG_USERAUTH_PK_OK,
                         ..
                     } => Ok(None),

@@ -231,10 +231,10 @@ pub(crate) enum Message<'a> {
         #[debug(skip)]
         data: &'a [u8],
     },
-    UnrecognizedMessage {
+    Unrecognized {
         code: u8,
         data: &'a [u8],
-    },
+    }
 }
 
 #[derive(Debug, snafu::Snafu)]
@@ -525,7 +525,7 @@ impl<'a> Message<'a> {
             }
             SSH_MSG_REQUEST_SUCCESS => Ok(Self::RequestSuccess),
             SSH_MSG_REQUEST_FAILURE => Ok(Self::RequestFailure),
-            code => Ok(Message::UnrecognizedMessage { code, data }),
+            code => Ok(Message::Unrecognized { code, data }),
         }
     }
 }

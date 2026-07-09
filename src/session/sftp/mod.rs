@@ -802,7 +802,7 @@ impl Handle {
                 language,
             } if status != Status::OK => {
                 tracing::debug!("language: {}", language);
-                return Err(status.to_error(error));
+                Err(status.to_error(error))
             }
             Payload::Handle(handle) => Ok(File::new(handle)),
             _ => Err(UnexpectedResponseSnafu {}.build().into()),

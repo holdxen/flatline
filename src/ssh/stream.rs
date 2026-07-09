@@ -105,10 +105,11 @@ where
     async fn send_payload(&mut self, payload: &[u8]) -> error::Result<()> {
         assert!(!payload.is_empty(), "payload must not be empty");
         let mut reset = false;
-        if payload[0] == protocol::SSH_MSG_NEWKEYS {
-            if self.client.kex_strict && self.server.kex_strict {
-                reset = true;
-            }
+        if payload[0] == protocol::SSH_MSG_NEWKEYS
+            && self.client.kex_strict
+            && self.server.kex_strict
+        {
+            reset = true;
         }
 
         let payload_len = payload.len();
@@ -198,10 +199,14 @@ where
                 maximum: protocol::MAX_PACKET_PAYLOAD_LENGTH,
                 actual: packet.payload.len(),
             }
-            .build().into());
+            .build()
+            .into());
 
             #[cfg(not(feature = "strict"))]
-            tracing::warn!("Maybe payload is too long, but we ignore it because strict feature is not enabled. payload length: {}", packet.payload.len());
+            tracing::warn!(
+                "Maybe payload is too long, but we ignore it because strict feature is not enabled. payload length: {}",
+                packet.payload.len()
+            );
         }
         if packet.payload.is_empty() {
             return Err(PayloadIsEmptySnafu.build().into());
@@ -249,10 +254,11 @@ where
     async fn send_payload(&mut self, mut payload: &[u8]) -> error::Result<()> {
         assert!(!payload.is_empty(), "payload must not be empty");
         let mut reset = false;
-        if payload[0] == protocol::SSH_MSG_NEWKEYS {
-            if self.client.kex_strict && self.server.kex_strict {
-                reset = true;
-            }
+        if payload[0] == protocol::SSH_MSG_NEWKEYS
+            && self.client.kex_strict
+            && self.server.kex_strict
+        {
+            reset = true;
         }
 
         let mut payload_len = payload.len();
@@ -640,20 +646,20 @@ where
     T: AsyncRead + AsyncWrite + Unpin + Send,
 {
     pub fn upgrade_client(
-        &mut self, 
+        &mut self,
         encrypt: Box<dyn Encrypt + Send>,
         encode: Box<dyn Encode + Send>,
-        calculator: Box<dyn Mac + Send>
+        calculator: Box<dyn Mac + Send>,
     ) {
         self.encrypt = encrypt;
         self.encode = encode;
         self.calculator = calculator;
     }
     pub fn upgrade_server(
-        &mut self, 
+        &mut self,
         decrypt: Box<dyn Decrypt + Send>,
         decode: Box<dyn Decode + Send>,
-        verify : Box<dyn Mac + Send>
+        verify: Box<dyn Mac + Send>,
     ) {
         self.decrypt = decrypt;
         self.decode = decode;
@@ -806,8 +812,10 @@ where
                         let content =
                             consumer.consume_bytes(length as usize - 1 - padding_len as usize)?;
 
-                        let mut packet = msg::Packet::default();
-                        packet.padding = consumer.peek().to_vec();
+                        let mut packet = msg::Packet {
+                            padding: consumer.peek().to_vec(),
+                            ..Default::default()
+                        };
 
                         if self.authenticated || self.decode.compress_in_authentication() {
                             self.decode.update(content)?;
@@ -904,12 +912,16 @@ where
                         let content =
                             consumer.consume_bytes(length as usize - 1 - padding_len as usize)?;
 
-                        let mut packet = msg::Packet::default();
+                        // let mut packet = msg::Packet::default();
 
-                        packet.padding = consumer.peek().to_vec();
+                        // packet.padding = consumer.peek().to_vec();
                         // if packet.padding.len() != padding_len as usize {
                         //     return Err(PaddingLengthIncorrectSnafu.build().into());
                         // }
+                        let mut packet = msg::Packet {
+                            padding: consumer.peek().to_vec(),
+                            ..Default::default()
+                        };
 
                         if self.authenticated || self.decode.compress_in_authentication() {
                             self.decode.update(content)?;
@@ -938,12 +950,16 @@ where
                         .into());
 
                         #[cfg(not(feature = "strict"))]
-                        tracing::warn!("Maybe payload is too long, but we ignore it because strict feature is not enabled. payload length: {}", packet.payload.len());
+                        tracing::warn!(
+                            "Maybe payload is too long, but we ignore it because strict feature is not enabled. payload length: {}",
+                            packet.payload.len()
+                        );
                     }
-                    if packet.payload[0] == protocol::SSH_MSG_NEWKEYS {
-                        if self.client.kex_strict && self.server.kex_strict {
-                            self.server.sequence_number = 0;
-                        }
+                    if packet.payload[0] == protocol::SSH_MSG_NEWKEYS
+                        && self.client.kex_strict
+                        && self.server.kex_strict
+                    {
+                        self.server.sequence_number = 0;
                     }
 
                     break Ok(packet);

@@ -139,7 +139,7 @@ impl<T: AsyncRead + Unpin> BufferStream<T> {
             // todo: improve performance
             for i in 0..self.r_buf.len() {
                 if i == max - 1 {
-                    return Err(io::Error::new(io::ErrorKind::Other, ""));
+                    return Err(io::Error::other("Read line error"));
                 }
                 if self.r_buf[i] == b'\r' && i < self.r_buf.len() - 1 && self.r_buf[i + 1] == b'\n'
                 {

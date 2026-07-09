@@ -119,7 +119,7 @@ impl MatchedMethods {
         secret_key: &[u8],
     ) -> error::Result<()> {
         let local_iv = self.kex.compute_communicate_key(
-            &secret_key[..],
+            secret_key,
             session_id,
             hash,
             b'A',
@@ -127,7 +127,7 @@ impl MatchedMethods {
         )?;
 
         let local_key = self.kex.compute_communicate_key(
-            &secret_key[..],
+            secret_key,
             session_id,
             hash,
             b'C',
@@ -138,14 +138,14 @@ impl MatchedMethods {
             .initialize(&local_iv, &local_key)?;
 
         let remote_iv = self.kex.compute_communicate_key(
-            &secret_key[..],
+            secret_key,
             session_id,
             hash,
             b'B',
             self.crypt_server_to_client.iv_len(),
         )?;
         let remote_key = self.kex.compute_communicate_key(
-            &secret_key[..],
+            secret_key,
             session_id,
             hash,
             b'D',
@@ -155,14 +155,14 @@ impl MatchedMethods {
         self.crypt_server_to_client
             .initialize(&remote_iv, &remote_key)?;
         let local_key = self.kex.compute_communicate_key(
-            &secret_key[..],
+            secret_key,
             session_id,
             hash,
             b'E',
             self.mac_client_to_server.key_len(),
         )?;
         let remote_key = self.kex.compute_communicate_key(
-            &secret_key[..],
+            secret_key,
             session_id,
             hash,
             b'F',
@@ -611,7 +611,7 @@ where
                     server_version: self.server_version.as_ref().unwrap(),
                     client_kex_init: self.client_kex_msg.as_ref().unwrap(),
                     server_kex_init: self.server_kex_msg.as_ref().unwrap(),
-                    server_host_key: &host_key,
+                    server_host_key: host_key,
                     client_public_key: &client_public_key,
                     server_public_key,
                     secret_key: &secret_key,
@@ -620,7 +620,7 @@ where
                 let hash = matched.kex.compute_hash(info)?;
 
                 tracing::info!("Using host_key algorithm: {}", matched.host_key.name());
-                matched.host_key.initialize(&host_key)?;
+                matched.host_key.initialize(host_key)?;
 
                 let res = matched.host_key.verify(signature, &hash)?;
 
@@ -1131,7 +1131,7 @@ where
                     server_version: self.session.server_version(),
                     client_kex_init: self.client_kex_msg.as_ref().unwrap(),
                     server_kex_init: self.server_kex_msg.as_ref().unwrap(),
-                    server_host_key: &host_key,
+                    server_host_key: host_key,
                     client_public_key: &client_public_key,
                     server_public_key,
                     secret_key: &secret_key,
@@ -1141,7 +1141,7 @@ where
 
                 tracing::info!("Using host_key algorithm: {}", matched.host_key.name());
 
-                matched.host_key.initialize(&host_key)?;
+                matched.host_key.initialize(host_key)?;
 
                 let res = matched.host_key.verify(signature, &hash)?;
 
@@ -1210,139 +1210,139 @@ where
     }
 }
 
-pub struct DecryptNothing;
+// pub struct DecryptNothing;
 
-impl Decrypt for DecryptNothing {
-    fn name(&self) -> &str {
-        "nothing"
-    }
+// impl Decrypt for DecryptNothing {
+//     fn name(&self) -> &str {
+//         "nothing"
+//     }
 
-    fn iv_len(&self) -> usize {
-        0
-    }
+//     fn iv_len(&self) -> usize {
+//         0
+//     }
 
-    fn key_len(&self) -> usize {
-        0
-    }
+//     fn key_len(&self) -> usize {
+//         0
+//     }
 
-    fn block_size(&self) -> usize {
-        8
-    }
+//     fn block_size(&self) -> usize {
+//         8
+//     }
 
-    fn initialize(&mut self, _: &[u8], _: &[u8]) -> error::Result<()> {
-        Ok(())
-    }
+//     fn initialize(&mut self, _: &[u8], _: &[u8]) -> error::Result<()> {
+//         Ok(())
+//     }
 
-    fn update(&mut self, data: &[u8], out: &mut Vec<u8>) -> error::Result<usize> {
-        out.extend_from_slice(data);
-        Ok(data.len())
-    }
+//     fn update(&mut self, data: &[u8], out: &mut Vec<u8>) -> error::Result<usize> {
+//         out.extend_from_slice(data);
+//         Ok(data.len())
+//     }
 
-    fn finalize(&mut self, _: &mut Vec<u8>) -> error::Result<usize> {
-        Ok(0)
-    }
+//     fn finalize(&mut self, _: &mut Vec<u8>) -> error::Result<usize> {
+//         Ok(0)
+//     }
 
-    fn is_galois_counter_mode(&self) -> bool {
-        false
-    }
+//     fn is_galois_counter_mode(&self) -> bool {
+//         false
+//     }
 
-    fn tag_len(&self) -> usize {
-        0
-    }
+//     fn tag_len(&self) -> usize {
+//         0
+//     }
 
-    fn update_sequence_number(&mut self, _: u32) -> error::Result<()> {
-        Ok(())
-    }
+//     fn update_sequence_number(&mut self, _: u32) -> error::Result<()> {
+//         Ok(())
+//     }
 
-    fn additional_authenticated_data(&mut self, _: &mut [u8]) -> error::Result<()> {
-        Ok(())
-    }
+//     fn additional_authenticated_data(&mut self, _: &mut [u8]) -> error::Result<()> {
+//         Ok(())
+//     }
 
-    fn authentication_tag(&mut self, _: &[u8]) -> error::Result<()> {
-        Ok(())
-    }
-}
+//     fn authentication_tag(&mut self, _: &[u8]) -> error::Result<()> {
+//         Ok(())
+//     }
+// }
 
-struct EncryptNothing;
+// struct EncryptNothing;
 
-impl Encrypt for EncryptNothing {
-    fn name(&self) -> &str {
-        "nothing"
-    }
+// impl Encrypt for EncryptNothing {
+//     fn name(&self) -> &str {
+//         "nothing"
+//     }
 
-    fn iv_len(&self) -> usize {
-        0
-    }
+//     fn iv_len(&self) -> usize {
+//         0
+//     }
 
-    fn key_len(&self) -> usize {
-        0
-    }
+//     fn key_len(&self) -> usize {
+//         0
+//     }
 
-    fn block_size(&self) -> usize {
-        8
-    }
+//     fn block_size(&self) -> usize {
+//         8
+//     }
 
-    fn initialize(&mut self, _: &[u8], _: &[u8]) -> error::Result<()> {
-        Ok(())
-    }
+//     fn initialize(&mut self, _: &[u8], _: &[u8]) -> error::Result<()> {
+//         Ok(())
+//     }
 
-    fn update(&mut self, data: &[u8], buf: &mut Vec<u8>) -> error::Result<usize> {
-        buf.extend_from_slice(data);
-        Ok(data.len())
-    }
+//     fn update(&mut self, data: &[u8], buf: &mut Vec<u8>) -> error::Result<usize> {
+//         buf.extend_from_slice(data);
+//         Ok(data.len())
+//     }
 
-    fn finalize(&mut self, _: &mut Vec<u8>) -> error::Result<usize> {
-        Ok(0)
-    }
+//     fn finalize(&mut self, _: &mut Vec<u8>) -> error::Result<usize> {
+//         Ok(0)
+//     }
 
-    fn is_galois_counter_mode(&self) -> bool {
-        false
-    }
+//     fn is_galois_counter_mode(&self) -> bool {
+//         false
+//     }
 
-    fn tag_len(&self) -> usize {
-        0
-    }
+//     fn tag_len(&self) -> usize {
+//         0
+//     }
 
-    fn update_sequence_number(&mut self, _: u32) -> error::Result<()> {
-        Ok(())
-    }
+//     fn update_sequence_number(&mut self, _: u32) -> error::Result<()> {
+//         Ok(())
+//     }
 
-    fn additional_authenticated_data(&mut self, _: &mut [u8]) -> error::Result<()> {
-        Ok(())
-    }
+//     fn additional_authenticated_data(&mut self, _: &mut [u8]) -> error::Result<()> {
+//         Ok(())
+//     }
 
-    fn authentication_tag(&mut self, _: &mut [u8]) -> error::Result<()> {
-        Ok(())
-    }
-}
-pub struct MacNothing;
+//     fn authentication_tag(&mut self, _: &mut [u8]) -> error::Result<()> {
+//         Ok(())
+//     }
+// }
+// pub struct MacNothing;
 
-impl Mac for MacNothing {
-    fn name(&self) -> &str {
-        "nothing"
-    }
+// impl Mac for MacNothing {
+//     fn name(&self) -> &str {
+//         "nothing"
+//     }
 
-    fn encrypt_then_mac(&self) -> bool {
-        false
-    }
+//     fn encrypt_then_mac(&self) -> bool {
+//         false
+//     }
 
-    fn key_len(&self) -> usize {
-        0
-    }
+//     fn key_len(&self) -> usize {
+//         0
+//     }
 
-    fn mac_len(&self) -> usize {
-        0
-    }
+//     fn mac_len(&self) -> usize {
+//         0
+//     }
 
-    fn initialize(&mut self, _: &[u8]) -> error::Result<()> {
-        Ok(())
-    }
+//     fn initialize(&mut self, _: &[u8]) -> error::Result<()> {
+//         Ok(())
+//     }
 
-    fn update(&mut self, _: &[u8]) -> error::Result<()> {
-        Ok(())
-    }
+//     fn update(&mut self, _: &[u8]) -> error::Result<()> {
+//         Ok(())
+//     }
 
-    fn finalize(&mut self) -> error::Result<Vec<u8>> {
-        Ok(Default::default())
-    }
-}
+//     fn finalize(&mut self) -> error::Result<Vec<u8>> {
+//         Ok(Default::default())
+//     }
+// }

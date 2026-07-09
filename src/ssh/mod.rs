@@ -15,7 +15,7 @@ impl MultiplePrecisionInteger for Vec<u8> {
     }
 
     fn into_integer(mut self) -> Vec<u8> {
-        while self.len() > 0 && self[0] == 0 {
+        while !self.is_empty() && self[0] == 0 {
             self.remove(0);
         }
 

@@ -18,6 +18,12 @@ pub trait Notifier {
         initial_window_size: &mut u32,
         maximum_packet_size: &mut u32,
     ) -> impl Future<Output = bool> + Send;
+    fn agent_forward(
+        &mut self,
+        receiver: oneshot::Receiver<forward::Stream>,
+        initial_window_size: &mut u32,
+        maximum_packet_size: &mut u32,
+    ) -> impl Future<Output = bool> + Send;
     fn disconnected(
         &mut self,
         reason: DisconnectReason,
@@ -57,5 +63,15 @@ impl Notifier for DefaultNotifier {
     async fn server_host_keys(&mut self, _: &[&[u8]]) -> bool {
         tracing::info!("server host keys");
         true
+    }
+    
+    async fn agent_forward(
+        &mut self,
+        _: oneshot::Receiver<forward::Stream>,
+        _: &mut u32,
+        _: &mut u32,
+    ) -> bool {
+        tracing::info!("Ignore agent forward");
+        false
     }
 }

@@ -8,6 +8,7 @@ use openssl::pkey::{Id, PKey};
 use snafu::{OptionExt, ResultExt};
 
 use crate::error::Result;
+use crate::ssh::MultiplePrecisionInteger;
 use crate::ssh::buffer::{Consumer, Producer};
 use crate::{
     cipher::{
@@ -16,18 +17,17 @@ use crate::{
     },
     error::builder,
 };
-use crate::ssh::MultiplePrecisionInteger;
-// 
+//
 // /// OpenSSH 支持的 20 种密钥类型（key_type）常量定义
-// 
+//
 // // ===== Ed25519 (2 种) =====
 // pub const KEY_TYPE_ED25519: &str = "ssh-ed25519";
 // pub const KEY_TYPE_ED25519_CERT: &str = "ssh-ed25519-cert-v01@openssh.com";
-// 
+//
 // // ===== Ed25519-SK (2 种) =====
 // pub const KEY_TYPE_SK_ED25519: &str = "sk-ssh-ed25519@openssh.com";
 // pub const KEY_TYPE_SK_ED25519_CERT: &str = "sk-ssh-ed25519-cert-v01@openssh.com";
-// 
+//
 // // ===== ECDSA (6 种) =====
 // pub const KEY_TYPE_ECDSA_NISTP256: &str = "ecdsa-sha2-nistp256";
 // pub const KEY_TYPE_ECDSA_NISTP256_CERT: &str = "ecdsa-sha2-nistp256-cert-v01@openssh.com";
@@ -35,14 +35,14 @@ use crate::ssh::MultiplePrecisionInteger;
 // pub const KEY_TYPE_ECDSA_NISTP384_CERT: &str = "ecdsa-sha2-nistp384-cert-v01@openssh.com";
 // pub const KEY_TYPE_ECDSA_NISTP521: &str = "ecdsa-sha2-nistp521";
 // pub const KEY_TYPE_ECDSA_NISTP521_CERT: &str = "ecdsa-sha2-nistp521-cert-v01@openssh.com";
-// 
+//
 // // ===== ECDSA-SK (4 种) =====
 // pub const KEY_TYPE_SK_ECDSA_NISTP256: &str = "sk-ecdsa-sha2-nistp256@openssh.com";
 // pub const KEY_TYPE_SK_ECDSA_NISTP256_CERT: &str = "sk-ecdsa-sha2-nistp256-cert-v01@openssh.com";
 // pub const KEY_TYPE_WEBAUTHN_SK_ECDSA_NISTP256: &str = "webauthn-sk-ecdsa-sha2-nistp256@openssh.com";
 // pub const KEY_TYPE_WEBAUTHN_SK_ECDSA_NISTP256_CERT: &str =
 //     "webauthn-sk-ecdsa-sha2-nistp256-cert-v01@openssh.com";
-// 
+//
 // // ===== RSA (6 种) =====
 // pub const KEY_TYPE_RSA: &str = "ssh-rsa";
 // pub const KEY_TYPE_RSA_CERT: &str = "ssh-rsa-cert-v01@openssh.com";
@@ -50,7 +50,7 @@ use crate::ssh::MultiplePrecisionInteger;
 // pub const KEY_TYPE_RSA_SHA256_CERT: &str = "rsa-sha2-256-cert-v01@openssh.com";
 // pub const KEY_TYPE_RSA_SHA512: &str = "rsa-sha2-512";
 // pub const KEY_TYPE_RSA_SHA512_CERT: &str = "rsa-sha2-512-cert-v01@openssh.com";
-// 
+//
 // /// 所有 20 种 key_type 的数组，方便遍历
 // pub const ALL_KEY_TYPES: [&str; 16] = [
 //     KEY_TYPE_ED25519,
@@ -102,8 +102,8 @@ pub enum Public {
         comment: Option<String>,
         #[debug(skip)]
         public: Vec<u8>,
-        principals: Vec<String>
-    }
+        principals: Vec<String>,
+    },
 }
 
 // pub struct Public {
@@ -623,7 +623,8 @@ impl Parser {
 
             let mut output = vec![0; cipher.key_len() + cipher.iv_len()];
 
-            bcrypt_pbkdf::bcrypt_pbkdf(passphrase, salt, round, &mut output).context(DecryptionSnafu)?;
+            bcrypt_pbkdf::bcrypt_pbkdf(passphrase, salt, round, &mut output)
+                .context(DecryptionSnafu)?;
 
             cipher.initialize(&output[cipher.key_len()..], &output[..cipher.key_len()])?;
 
@@ -689,25 +690,31 @@ impl Parser {
 
             let result = match method {
                 "ssh-rsa" => {
-                    let n =consumer.consume_one()?.to_vec();
+                    let n = consumer.consume_one()?.to_vec();
                     let e = consumer.consume_one()?.to_vec();
 
                     {
                         let mut consumer = Consumer::new(public_key_data);
                         if consumer.consume_one()? != method.as_bytes() {
                             return Err(FormatSnafu {
-                                detail: "Key type mismatched"
-                            }.build().into())
+                                detail: "Key type mismatched",
+                            }
+                            .build()
+                            .into());
                         }
                         if consumer.consume_one()? != e {
                             return Err(FormatSnafu {
-                                detail: "Rsa e mismatched"
-                            }.build().into())
+                                detail: "Rsa e mismatched",
+                            }
+                            .build()
+                            .into());
                         }
                         if consumer.consume_one()? != n {
                             return Err(FormatSnafu {
-                                detail: "Rsa e mismatched"
-                            }.build().into())
+                                detail: "Rsa e mismatched",
+                            }
+                            .build()
+                            .into());
                         }
                     }
 
@@ -715,7 +722,6 @@ impl Parser {
                     let iqmp = consumer.consume_one()?.to_vec();
                     let p = consumer.consume_one()?.to_vec();
                     let q = consumer.consume_one()?.to_vec();
-
 
                     let private = make_buffer_without_header! {
                         one: method,
@@ -725,7 +731,8 @@ impl Parser {
                         one: iqmp,
                         one: p,
                         one: q
-                    }.into_vec();
+                    }
+                    .into_vec();
 
                     let comment = consumer.consume_one()?;
 
@@ -737,7 +744,7 @@ impl Parser {
                         r#type: method.to_string(),
                         comment,
                     }
-                },
+                }
                 "ssh-ed25519" => {
                     // let r#type = consumer.consume_one()?;
                     // let s = String::from_utf8_lossy(r#type);
@@ -752,31 +759,40 @@ impl Parser {
                         let mut consumer = Consumer::new(public_key_data);
                         if consumer.consume_one()? != method.as_bytes() {
                             return Err(FormatSnafu {
-                                detail: "Key type mismatched"
-                            }.build().into());
+                                detail: "Key type mismatched",
+                            }
+                            .build()
+                            .into());
                         }
                         if consumer.consume_one()? != public {
                             return Err(FormatSnafu {
-                                detail: "Public key mismatched"
-                            }.build().into());
+                                detail: "Public key mismatched",
+                            }
+                            .build()
+                            .into());
                         }
                     }
                     if secret.len() != 64 {
                         return Err(FormatSnafu {
                             detail: "Unexpected secret length",
-                        }.build().into());
+                        }
+                        .build()
+                        .into());
                     }
 
                     if public != &secret[32..] {
                         return Err(FormatSnafu {
                             detail: "Unexpected secret key",
-                        }.build().into());
+                        }
+                        .build()
+                        .into());
                     }
 
                     let private = make_buffer_without_header!(
                         one: method,
                         one: &secret[..32]
-                    ).into_vec();
+                    )
+                    .into_vec();
 
                     let comment = consumer.consume_one()?;
 
@@ -789,15 +805,15 @@ impl Parser {
                         comment,
                     }
                 }
-                "ecdsa-sha2-nistp256" |
-                "ecdsa-sha2-nistp384" |
-                "ecdsa-sha2-nistp521" => {
+                "ecdsa-sha2-nistp256" | "ecdsa-sha2-nistp384" | "ecdsa-sha2-nistp521" => {
                     let curve = consumer.consume_one()?;
 
                     if !method.as_bytes().ends_with(curve) {
                         return Err(FormatSnafu {
-                            detail: "Curve mismatched"
-                        }.build().into());
+                            detail: "Curve mismatched",
+                        }
+                        .build()
+                        .into());
                     }
 
                     let public_key = consumer.consume_one()?;
@@ -806,18 +822,24 @@ impl Parser {
                         let mut consumer = Consumer::new(public_key_data);
                         if consumer.consume_one()? != method.as_bytes() {
                             return Err(FormatSnafu {
-                                detail: "Key type mismatched"
-                            }.build().into());
+                                detail: "Key type mismatched",
+                            }
+                            .build()
+                            .into());
                         }
                         if consumer.consume_one()? != curve {
                             return Err(FormatSnafu {
-                                detail: "Curve mismatched"
-                            }.build().into());
+                                detail: "Curve mismatched",
+                            }
+                            .build()
+                            .into());
                         }
                         if consumer.consume_one()? != public_key {
                             return Err(FormatSnafu {
-                                detail: "Public key dismatched"
-                            }.build().into());
+                                detail: "Public key dismatched",
+                            }
+                            .build()
+                            .into());
                         }
                     }
                     let private = make_buffer_without_header! {
@@ -825,7 +847,8 @@ impl Parser {
                         one: curve,
                         one: public_key,
                         one: private_key
-                    }.into_vec();
+                    }
+                    .into_vec();
 
                     let comment = consumer.consume_one()?;
 
@@ -838,14 +861,12 @@ impl Parser {
                     }
                 }
                 _ => {
-                    return Err(UnsupportedKeyTypeSnafu {
-                        r#type: method,
-                    }.build().into());
+                    return Err(UnsupportedKeyTypeSnafu { r#type: method }.build().into());
                 }
             };
 
             for i in 0..consumer.peek().len() {
-                if consumer.peek()[i] != (i + 1) as u8 & 0xff {
+                if consumer.peek()[i] != (i + 1) as u8 {
                     return Err(FormatSnafu {
                         detail: "Unexpected padding in private key",
                     }
@@ -855,9 +876,6 @@ impl Parser {
             }
 
             Ok(result)
-
-
-
 
             // let parsers = Self::private_key_content_parser();
 
@@ -907,15 +925,16 @@ impl Parser {
         let content = std::str::from_utf8(content).context(TextSnafu)?;
         let trim = content.replace("\r", "").replace("\n", "");
 
-        if let Some(content) = trim.strip_prefix(Self::OPEN_SSH_HEADER) {
-            if let Some(content) = content.strip_suffix(Self::OPEN_SSH_FOOTER) {
-                let content = decode_block(content).context(builder::OpenSSL)?;
+        if let Some(content) = trim.strip_prefix(Self::OPEN_SSH_HEADER)
+            && let Some(content) = content.strip_suffix(Self::OPEN_SSH_FOOTER)
+        {
+            let content = decode_block(content).context(builder::OpenSSL)?;
 
-                return self.parse_private_key_file_open_ssh(&content, passphrase);
-            }
+            return self.parse_private_key_file_open_ssh(&content, passphrase);
         }
         let key = if let Some(passphrase) = passphrase {
-            PKey::private_key_from_pem_passphrase(content.as_bytes(), passphrase).context(builder::OpenSSL)?
+            PKey::private_key_from_pem_passphrase(content.as_bytes(), passphrase)
+                .context(builder::OpenSSL)?
         } else {
             PKey::private_key_from_pem(content.as_bytes()).context(builder::OpenSSL)?
         };
@@ -942,14 +961,15 @@ impl Parser {
                     one: iqmp.to_integer(),
                     one: p.to_integer(),
                     one: q.to_integer(),
-                }.into_vec();
+                }
+                .into_vec();
 
                 let public = make_buffer_without_header! {
                     one: "ssh-rsa",
                     one: rsa.e().to_integer(),
                     one: rsa.n().to_integer(),
-                }.into_vec();
-
+                }
+                .into_vec();
 
                 // let public = Rsa::from_public_components(rsa.n().to_owned().context(builder::OpenSSL)?, rsa.e().to_owned().context(builder::OpenSSL)?).context(builder::OpenSSL)?;
 
@@ -967,12 +987,14 @@ impl Parser {
                 let private = make_buffer_without_header! {
                     one: "ssh-ed25519",
                     one: private
-                }.into_vec();
+                }
+                .into_vec();
 
                 let public = make_buffer_without_header! {
                     one: "ssh-ed25519",
                     one: public
-                }.into_vec();
+                }
+                .into_vec();
 
                 Ok(Private {
                     r#type: "ssh-ed25519".to_string(),
@@ -986,27 +1008,34 @@ impl Parser {
                 let private_key = ec_key.private_key();
                 let public_key = ec_key.public_key();
                 let group = ec_key.group();
-                let curve = group.curve_name().context(FormatSnafu {
-                    detail: "EC private key is invalid",
-                })?.short_name().context(builder::OpenSSL)?;
+                let curve = group
+                    .curve_name()
+                    .context(FormatSnafu {
+                        detail: "EC private key is invalid",
+                    })?
+                    .short_name()
+                    .context(builder::OpenSSL)?;
 
                 let mut ctx = BigNumContext::new().context(builder::OpenSSL)?;
 
-                let public_key = public_key.to_bytes(group, PointConversionForm::UNCOMPRESSED, &mut ctx).context(builder::OpenSSL)?;
+                let public_key = public_key
+                    .to_bytes(group, PointConversionForm::UNCOMPRESSED, &mut ctx)
+                    .context(builder::OpenSSL)?;
 
                 let private = make_buffer_without_header! {
                     one: format!("ecdsa-sha2-{}", curve),
                     one: curve,
                     one: &public_key,
                     one: private_key.to_integer()
-                }.into_vec();
-
+                }
+                .into_vec();
 
                 let public = make_buffer_without_header! {
                     one: format!("ecdsa-sha2-{}", curve),
                     one: curve,
                     one: public_key,
-                }.into_vec();
+                }
+                .into_vec();
 
                 Ok(Private {
                     r#type: format!("ecdsa-sha2-{}", curve),
@@ -1015,45 +1044,41 @@ impl Parser {
                     comment: "".to_string(),
                 })
             }
-            _ => {
-                Err(UnsupportedKeyTypeSnafu {
-                    r#type: format!("{:?}", key.id()),
-                }.build().into())
+            _ => Err(UnsupportedKeyTypeSnafu {
+                r#type: format!("{:?}", key.id()),
             }
+            .build()
+            .into()),
         }
-
     }
 
     pub fn parse_public_key_file(&self, content: &[u8]) -> Result<Public> {
-
         {
             let content = std::str::from_utf8(content).context(TextSnafu)?;
 
             let content = content.trim().replace("\r\n", "\n");
             let content = content.replace("\r", "\n");
 
-            if let Some(content) = content.strip_prefix(Self::SSH2_PUBLIC_KEY_HEADER) {
-                if let Some(content) = content.strip_suffix(Self::SSH2_PUBLIC_KEY_FOOTER) {
-                    let content = content.trim();
+            if let Some(content) = content.strip_prefix(Self::SSH2_PUBLIC_KEY_HEADER)
+                && let Some(content) = content.strip_suffix(Self::SSH2_PUBLIC_KEY_FOOTER)
+            {
+                let content = content.trim();
 
-                    let lines = content.split("\n").collect::<Vec<&str>>();
-                    if lines.len() == 2 {
-                        if let Some(comment) = lines[0].strip_prefix("Comment:") {
-                            let decoded = decode_block(lines[1]).context(builder::OpenSSL)?;
-                            let mut consumer = Consumer::new(&decoded);
-                            let r#type = consumer.consume_one()?;
-                            let r#type = std::str::from_utf8(r#type).context(TextSnafu)?;
-                            return Ok(Public::Normal {
-                                r#type: r#type.to_string(),
-                                content: decoded,
-                                comment: Some(comment.trim_matches('\"').to_string()),
-                            })
-                        }
-                    }
-
+                let lines = content.split("\n").collect::<Vec<&str>>();
+                if lines.len() == 2
+                    && let Some(comment) = lines[0].strip_prefix("Comment:")
+                {
+                    let decoded = decode_block(lines[1]).context(builder::OpenSSL)?;
+                    let mut consumer = Consumer::new(&decoded);
+                    let r#type = consumer.consume_one()?;
+                    let r#type = std::str::from_utf8(r#type).context(TextSnafu)?;
+                    return Ok(Public::Normal {
+                        r#type: r#type.to_string(),
+                        content: decoded,
+                        comment: Some(comment.trim_matches('\"').to_string()),
+                    });
                 }
             }
-
         }
 
         fn is_space_or_tab(byte: u8) -> bool {
@@ -1103,10 +1128,10 @@ impl Parser {
 
         let mut comment = None;
         if !consumer.peek().is_empty() {
-            'out: loop {
-                let Ok(byte) = consumer.peek_u8() else {
-                    break;
-                };
+            'out: while let Ok(byte) = consumer.consume_u8() {
+                // let Ok(byte) = consumer.peek_u8() else {
+                //     break;
+                // };
                 if is_space_or_tab(byte) {
                     consumer.consume(1);
                     continue;
@@ -1134,8 +1159,10 @@ impl Parser {
             let mut consumer = Consumer::new(&content);
             if consumer.consume_one()? != method.as_bytes() {
                 return Err(FormatSnafu {
-                    detail: "Mismatch key type"
-                }.build().into());
+                    detail: "Mismatch key type",
+                }
+                .build()
+                .into());
             }
             let _nonce = consumer.consume_one()?;
             // let public = consumer.consume_one()?.to_vec();
@@ -1149,16 +1176,16 @@ impl Parser {
                 }
                 "ssh-rsa-cert-v01@openssh.com" => {
                     // RSA: 两个 bignum
-                    let e = consumer.consume_one()?;  // 指数
-                    let n = consumer.consume_one()?;  // 模数
+                    let e = consumer.consume_one()?; // 指数
+                    let n = consumer.consume_one()?; // 模数
                     make_buffer_without_header!(
                         one: e,
                         one: n
                     )
                 }
-                "ecdsa-sha2-nistp256-cert-v01@openssh.com" |
-                "ecdsa-sha2-nistp384-cert-v01@openssh.com" |
-                "ecdsa-sha2-nistp521-cert-v01@openssh.com" => {
+                "ecdsa-sha2-nistp256-cert-v01@openssh.com"
+                | "ecdsa-sha2-nistp384-cert-v01@openssh.com"
+                | "ecdsa-sha2-nistp521-cert-v01@openssh.com" => {
                     // ECDSA: 有 curve 和 public key 两个字段
                     let curve = consumer.consume_one()?;
                     let public = consumer.consume_one()?;
@@ -1181,18 +1208,17 @@ impl Parser {
                     }
                 }
                 _ => {
-                    return Err(UnsupportedKeyTypeSnafu {
-                        r#type: method
-                    }.build().into());
+                    return Err(UnsupportedKeyTypeSnafu { r#type: method }.build().into());
                 }
-            }.into_vec();
+            }
+            .into_vec();
             let _serial = consumer.consume_u64()?;
             let _type = consumer.consume_u32()?;
             let _key_id = consumer.consume_one()?;
             let principals = {
                 let mut result = Vec::new();
                 let principals = consumer.consume_one()?;
-                let mut consumer = Consumer::new(&principals);
+                let mut consumer = Consumer::new(principals);
                 while !consumer.peek().is_empty() {
                     let name = std::str::from_utf8(consumer.consume_one()?).context(TextSnafu)?;
                     result.push(name.to_string());
@@ -1217,9 +1243,12 @@ impl Parser {
                 principals,
             })
         } else {
-            Ok(Public::Normal { r#type: method, content, comment })
+            Ok(Public::Normal {
+                r#type: method,
+                content,
+                comment,
+            })
         }
-
 
         // Ok(Public {
         //     method: method.to_string(),
@@ -1231,10 +1260,10 @@ impl Parser {
 
 #[cfg(test)]
 mod test {
-    use std::path::Path;
-    use rand::distr::Alphanumeric;
-    use rand::RngExt;
     use super::*;
+    use rand::RngExt;
+    use rand::distr::Alphanumeric;
+    use std::path::Path;
 
     #[test]
     fn test_parse_private_key_file() {
@@ -1243,10 +1272,11 @@ mod test {
         let parse = |file: &Path, passphrase: Option<&str>| {
             let content = std::fs::read(file).unwrap();
             let parser = Parser::default();
-            let private = parser.parse_private_key_file(&content, passphrase.map(|v| v.as_bytes())).unwrap();
+            let private = parser
+                .parse_private_key_file(&content, passphrase.map(|v| v.as_bytes()))
+                .unwrap();
             tracing::info!("private: {:?}", private);
         };
-
 
         let ciphers = ["rsa", "ed25519", "ecdsa"];
 
@@ -1254,7 +1284,6 @@ mod test {
             let path = tempfile::tempdir().unwrap();
             for i in ciphers {
                 if i == "ecdsa" {
-
                     for j in ["521", "384", "256"] {
                         let status = std::process::Command::new("ssh-keygen")
                             .arg("-t")
@@ -1264,11 +1293,16 @@ mod test {
                             .arg("-b")
                             .arg(j)
                             .arg("-N")
-                            .arg(passphrase.unwrap_or_default()).status().unwrap();
+                            .arg(passphrase.unwrap_or_default())
+                            .status()
+                            .unwrap();
 
                         assert!(status.success());
 
-                        parse(path.path().join(format!("{}_{}", i, j)).as_path(), passphrase);
+                        parse(
+                            path.path().join(format!("{}_{}", i, j)).as_path(),
+                            passphrase,
+                        );
                     }
 
                     continue;
@@ -1279,7 +1313,9 @@ mod test {
                     .arg("-f")
                     .arg(path.path().join(i))
                     .arg("-N")
-                    .arg(passphrase.unwrap_or_default()).status().unwrap();
+                    .arg(passphrase.unwrap_or_default())
+                    .status()
+                    .unwrap();
 
                 assert!(status.success());
 
@@ -1290,18 +1326,14 @@ mod test {
         run(None);
         let mut rng = rand::rng();
 
-        let s: String = (0..10)
-            .map(|_| rng.sample(Alphanumeric) as char)
-            .collect();
+        let s: String = (0..10).map(|_| rng.sample(Alphanumeric) as char).collect();
 
         tracing::info!("passphrase: {}", s);
         run(Some(s.as_str()));
-
     }
 
     #[test]
     fn test_parse_public_key_file() {
-
         tracing_subscriber::fmt::init();
         let parse = |file: &Path| {
             let content = std::fs::read(file).unwrap();
@@ -1320,7 +1352,9 @@ mod test {
             .arg("-f")
             .arg(path.path().join("ca"))
             .arg("-N")
-            .arg("").status().unwrap();
+            .arg("")
+            .status()
+            .unwrap();
 
         assert!(status.success());
 
@@ -1329,10 +1363,9 @@ mod test {
         let users = vec!["root", "user1", "user2"];
         let host = "user@example.com";
 
-        let sign = ||  {
+        let sign = || {
             let mut cmd = std::process::Command::new("ssh-keygen");
-                cmd
-                .arg("-s")
+            cmd.arg("-s")
                 .arg(path.path().join("ca"))
                 .arg("-I")
                 .arg(host)
@@ -1343,7 +1376,6 @@ mod test {
 
         for i in ciphers {
             if i == "ecdsa" {
-
                 for j in ["521", "384", "256"] {
                     let status = std::process::Command::new("ssh-keygen")
                         .arg("-t")
@@ -1353,7 +1385,9 @@ mod test {
                         .arg("-b")
                         .arg(j)
                         .arg("-N")
-                        .arg("").status().unwrap();
+                        .arg("")
+                        .status()
+                        .unwrap();
 
                     assert!(status.success());
 
@@ -1376,21 +1410,18 @@ mod test {
                 .arg("-f")
                 .arg(path.path().join(i))
                 .arg("-N")
-                .arg("").status().unwrap();
-
-            assert!(status.success());
-
-            parse(path.path().join(format!( "{}.pub", i)).as_path());
-
-            let status = sign()
-                .arg(path.path().join(i))
+                .arg("")
                 .status()
                 .unwrap();
 
             assert!(status.success());
-            parse(path.path().join(format!( "{}-cert.pub", i)).as_path());
 
+            parse(path.path().join(format!("{}.pub", i)).as_path());
+
+            let status = sign().arg(path.path().join(i)).status().unwrap();
+
+            assert!(status.success());
+            parse(path.path().join(format!("{}-cert.pub", i)).as_path());
         }
-
     }
 }

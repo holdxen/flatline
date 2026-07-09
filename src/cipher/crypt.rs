@@ -476,7 +476,7 @@ impl GaloisCounterMode {
 
 impl Encrypt for GaloisCounterMode {
     fn name(&self) -> &str {
-        &self.name
+        self.name
     }
 
     fn is_galois_counter_mode(&self) -> bool {
@@ -548,7 +548,7 @@ impl Encrypt for GaloisCounterMode {
 
 impl Decrypt for GaloisCounterMode {
     fn name(&self) -> &str {
-        &self.name
+        self.name
     }
 
     fn is_galois_counter_mode(&self) -> bool {

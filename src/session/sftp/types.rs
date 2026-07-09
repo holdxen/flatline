@@ -172,7 +172,7 @@ pub enum Status {
 }
 
 impl Status {
-    pub(super) fn to_error(&self, msg: String) -> error::Error {
+    pub(super) fn to_error(self, msg: String) -> error::Error {
         match self {
             Status::OK =>super::UnexpectedResponseSnafu.build().into(),
             Status::Eof =>super::UnexpectedEofSnafu { msg }.build().into(),
@@ -185,7 +185,7 @@ impl Status {
             Status::OpUnsupported =>super::OpUnsupportedSnafu { msg }.build().into(),   
         }
     }
-    pub(super) fn to_result(&self, msg: String) -> error::Result<()> {
+    pub(super) fn to_result(self, msg: String) -> error::Result<()> {
         match self {
             Status::OK => Ok(()),
             Status::Eof => Err(super::UnexpectedEofSnafu { msg }.build().into()),

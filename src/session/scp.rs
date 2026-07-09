@@ -215,7 +215,7 @@ impl Handle {
             Err(FailureSnafu {
                 msg
             }.build().into())
-        } else if code == 1 {
+        } else if code == 2 {
             let line =  self.channel.read_line_lf().await?;
             let msg = std::str::from_utf8(&line[..line.len()-1]).context(UnexpectedErrorMessageSnafu)?.to_string();
 

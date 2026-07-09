@@ -49,8 +49,7 @@ pub enum Message {
 /// 参考文档：
 /// - https://tools.ietf.org/html/rfc4254#section-8
 /// - https://www.iana.org/assignments/ssh-parameters/ssh-parameters.xhtml#ssh-parameters-16
-
-/// Terminal Modes Opcode 枚举
+///   Terminal Modes Opcode 枚举
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum TtyOpcode {
@@ -753,7 +752,7 @@ impl Drop for Channel {
 
         self.closed = true;
 
-        if let Err(_) = receiver.try_recv() {
+        if receiver.try_recv().is_err() {
             tracing::warn!("Failed to wait for channel closed")
         }
     }

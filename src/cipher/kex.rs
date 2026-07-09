@@ -745,7 +745,7 @@ impl KeyExchange for Curve25519Impl {
         let server_public = PKey::public_key_from_raw_bytes(server_public_key, Id::X25519)
             .context(builder::OpenSSL)?;
 
-        let mut ctx = PkeyCtx::new(&private_key).context(builder::OpenSSL)?;
+        let mut ctx = PkeyCtx::new(private_key).context(builder::OpenSSL)?;
         ctx.derive_init().context(builder::OpenSSL)?;
         ctx.derive_set_peer(&server_public)
             .context(builder::OpenSSL)?;
@@ -871,7 +871,7 @@ impl KeyExchange for MlKem768X25519 {
                 PKey::public_key_from_raw_bytes(&server_public_key[1088..], Id::X25519)
                     .context(builder::OpenSSL)?;
 
-            let mut ctx = PkeyCtx::new(&private_key).context(builder::OpenSSL)?;
+            let mut ctx = PkeyCtx::new(private_key).context(builder::OpenSSL)?;
             ctx.derive_init().context(builder::OpenSSL)?;
             ctx.derive_set_peer(&server_public)
                 .context(builder::OpenSSL)?;
