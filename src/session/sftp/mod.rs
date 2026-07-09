@@ -78,6 +78,7 @@ pub struct Handle {
 }
 
 impl Handle {
+    const MAX_PACKET_SIZE: u32 = 1024 * 1024 * 1024;
     pub(super) async fn handshake(channel: Channel) -> error::Result<Self> {
         let mut channel = BufferChannel::new(channel);
 
@@ -93,6 +94,11 @@ impl Handle {
         let len = channel.fill_exact(4).await?;
 
         let len = u32::from_be_bytes(len.try_into().unwrap());
+        
+        if len > Self::MAX_PACKET_SIZE {
+            tracing::error!("Packet is too long");
+            return Err(UnexpectedResponseSnafu.build().into());
+        }
 
         let data = channel.fill_exact(len as usize + 4).await?;
 
@@ -477,7 +483,7 @@ impl Handle {
 
                     let groupnames = {
                         let mut consumer = Consumer::new(consumer.consume_one()?);
-                        let mut groupnames = Vec::with_capacity(users.len());
+                        let mut groupnames = Vec::with_capacity(groups.len());
                         while !consumer.is_empty() {
                             let name = std::str::from_utf8(consumer.consume_one()?)
                                 .context(msg::ExpectStringSnafu)?;
@@ -565,7 +571,7 @@ impl Handle {
         self.handle(
             |request_id| {
                 make_buffer! {
-                    u8: SSH_FXP_READLINK,
+                    u8: SSH_FXP_SYMLINK,
                     u32: request_id,
                     one: target,
                     one: linkpath

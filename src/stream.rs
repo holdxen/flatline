@@ -135,6 +135,9 @@ impl<T: AsyncRead + Unpin> BufferStream<T> {
     // }
 
     pub async fn read_line_crlf(&mut self, max: usize) -> io::Result<Vec<u8>> {
+        if max < 2 {
+            return Err(io::Error::other("line ending with crlf size must >= 2"));
+        }
         loop {
             // todo: improve performance
             for i in 0..self.r_buf.len() {

@@ -753,7 +753,7 @@ impl Drop for Channel {
         self.closed = true;
 
         if receiver.try_recv().is_err() {
-            tracing::warn!("Failed to wait for channel closed")
+            tracing::debug!("Failed to wait for channel closed")
         }
     }
 }

@@ -706,7 +706,7 @@ impl Parser {
                         }
                         if consumer.consume_one()? != n {
                             return Err(FormatSnafu {
-                                detail: "Rsa e mismatched",
+                                detail: "Rsa n mismatched",
                             }
                             .build()
                             .into());
@@ -1123,7 +1123,7 @@ impl Parser {
 
         let mut comment = None;
         if !consumer.peek().is_empty() {
-            'out: while let Ok(byte) = consumer.consume_u8() {
+            'out: while let Ok(byte) = consumer.peek_u8() {
                 // let Ok(byte) = consumer.peek_u8() else {
                 //     break;
                 // };

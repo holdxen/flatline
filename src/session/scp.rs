@@ -272,7 +272,7 @@ impl Handle {
         let file_name = shlex::try_quote(file_name)
             .context(InvalidTargetNameSnafu)?
             .to_string();
-        let line = format!("C0{:o} {} {}\n", permission, size, file_name);
+        let line = format!("C{:04o} {} {}\n", permission, size, file_name);
 
         self.channel.send(line.as_bytes()).await?;
         self.channel.flush().await?;

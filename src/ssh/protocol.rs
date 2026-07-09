@@ -241,6 +241,7 @@ pub mod sftp {
     pub const SSH_FXP_STAT: u8 = 17;
     pub const SSH_FXP_RENAME: u8 = 18;
     pub const SSH_FXP_READLINK: u8 = 19;
+    pub const SSH_FXP_SYMLINK: u8 = 20;
 
     pub const SSH_FXP_STATUS: u8 = 101;
     pub const SSH_FXP_HANDLE: u8 = 102;

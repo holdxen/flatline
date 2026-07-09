@@ -1251,6 +1251,8 @@ where
 
         let left = channel.client.left();
 
+        channel.client.used_window_size += data.len() as i64;
+
         if data.len() > left as usize {
             tracing::warn!(
                 "Data too long, ignore: left={}, actual={}",
@@ -1270,8 +1272,6 @@ where
             tracing::warn!("Unable to send data to channel({})", client_id);
             return Ok(());
         }
-
-        channel.client.used_window_size += data.len() as i64;
 
         if channel.client.left() < min {
             let size = channel
@@ -1682,9 +1682,6 @@ where
         want_reply: bool,
         addr: &forward::SocketAddr,
     ) -> error::Result<()> {
-        if self.forward.remove(addr).is_none() {
-            tracing::warn!("Maybe forward listener not exists")
-        }
 
         let buffer = make_buffer_without_header! {
             u8: SSH_MSG_GLOBAL_REQUEST,
@@ -1696,9 +1693,14 @@ where
         self.socket.send_payload(&buffer[..]).await?;
 
         if want_reply {
-            self.match_msg(|msg| {
+            self.match_this_msg(|this, msg| {
                 Some(match msg {
-                    Message::RequestSuccess => Ok(()),
+                    Message::RequestSuccess => {
+                        if this.forward.remove(addr).is_none() {
+                            tracing::warn!("Maybe forward listener not exists")
+                        }
+                        Ok(())
+                    },
                     Message::RequestFailure => Err(RequestFailureSnafu.build().into()),
                     _ => return None,
                 })
@@ -2023,8 +2025,8 @@ where
         let buffer = make_buffer_without_header!(
             u8: SSH_MSG_CHANNEL_REQUEST,
             u32: id.server,
-            u8: if want_reply { 1 } else { 0 },
             one: "break",
+            u8: if want_reply { 1 } else { 0 },
             u32: milliseconds
         );
 
