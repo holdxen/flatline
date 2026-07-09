@@ -28,6 +28,8 @@ pub enum Error {
     UnexpectBlockSize { size: usize },
     #[snafu(display("MAC verification failed"))]
     MacVerificationFailed,
+    #[snafu(display("Unexpected padding length"))]
+    UnexpectedPaddingLength
 }
 
 pub trait Stream: Send {
@@ -203,10 +205,6 @@ where
                 packet.payload.len()
             );
         }
-        if packet.payload.is_empty() {
-            return Err(PayloadIsEmptySnafu.build().into());
-        }
-
         self.socket.consume_read_buffer(4 + size as usize);
 
         self.server.sequence_number = self.server.sequence_number.wrapping_add(1);
@@ -730,8 +728,13 @@ where
                         self.decrypt.finalize(&mut output)?;
                         let mut consumer = Consumer::new(&output);
                         let padding_len = consumer.consume_u8()?;
+
+                        if length <= padding_len as u32 + 1 {
+                            return Err(UnexpectedPaddingLengthSnafu.build().into());
+                        }
+
                         let content =
-                            consumer.consume_bytes(output.len() - padding_len as usize - 1)?;
+                            consumer.consume_bytes((length - padding_len as u32 - 1) as usize)?;
 
                         let mut packet = msg::Packet::default();
                         {
@@ -804,6 +807,11 @@ where
                         let mut consumer = Consumer::new(decrypted);
 
                         let padding_len = consumer.consume_u8()?;
+
+                        if length <= padding_len as u32 + 1 {
+                            return Err(UnexpectedPaddingLengthSnafu.build().into());
+                        }
+                        
                         let content =
                             consumer.consume_bytes(length as usize - 1 - padding_len as usize)?;
 
@@ -903,6 +911,10 @@ where
 
                         let mut consumer = Consumer::new(&decrypted[4..length as usize + 4]);
                         let padding_len = consumer.consume_u8()?;
+
+                        if length <= padding_len as u32 + 1 {
+                            return Err(UnexpectedPaddingLengthSnafu.build().into());
+                        }
 
                         let content =
                             consumer.consume_bytes(length as usize - 1 - padding_len as usize)?;

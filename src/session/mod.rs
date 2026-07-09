@@ -129,6 +129,12 @@ pub enum Error {
     #[snafu(display("Unexpected channel EOF"))]
     UnexpectedChannelEof,
 
+    #[snafu(display("Unexpected window size"))]
+    UnexpectedWindowSize,
+
+    #[snafu(display("Channel window overflow"))]
+    ChannelWindowOverflow,
+
     #[snafu(transparent)]
     SecureCopyProtocolError { source: scp::Error },
     #[snafu(transparent)]

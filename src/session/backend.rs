@@ -584,7 +584,7 @@ where
             u8: SSH_MSG_DISCONNECT,
             u32: reason,
             one: description,
-            u32: 0
+            one: ""
         };
         self.socket.send_payload(&buffer[..]).await
     }
@@ -1174,7 +1174,11 @@ where
             return Ok(());
         };
 
-        channel.server.used_window_size -= count as i64;
+        channel.server.used_window_size = channel
+            .server
+            .used_window_size
+            .checked_sub(count as i64)
+            .context(super::UnexpectedWindowSizeSnafu)?;
 
         if let Err(e) = channel
             .sender
@@ -1199,7 +1203,8 @@ where
 
         while sent != data.len() && channel.server.left() != 0 {
             let size = (data.len() - sent)
-                .min(MAX_PACKET_PAYLOAD_LENGTH - 4 - 1)
+                .min(MAX_PACKET_PAYLOAD_LENGTH - 1 - 4 - 4)
+                .min(channel.server.maximum_packet_size as usize)
                 .min(channel.server.left() as usize);
             let buffer = make_buffer_without_header!(
                 u8: SSH_MSG_CHANNEL_DATA,
@@ -1251,16 +1256,16 @@ where
 
         let left = channel.client.left();
 
-        channel.client.used_window_size += data.len() as i64;
-
         if data.len() > left as usize {
             tracing::warn!(
                 "Data too long, ignore: left={}, actual={}",
                 left,
                 data.len()
             );
-            return Ok(());
+            return Err(super::ChannelWindowOverflowSnafu.build().into());
         }
+
+        channel.client.used_window_size += data.len() as i64;
 
         let msg = if stderr {
             channel::Message::Stderr(data.to_vec())
@@ -1268,8 +1273,8 @@ where
             channel::Message::Stdout(data.to_vec())
         };
 
-        if channel.sender.send(msg).await.is_err() {
-            tracing::warn!("Unable to send data to channel({})", client_id);
+        if let Err(e) = channel.sender.send(msg).await {
+            tracing::warn!("Unable to send data to channel({}): {}", client_id, e);
             return Ok(());
         }
 
@@ -1278,8 +1283,7 @@ where
                 .client
                 .used_window_size
                 .unsigned_abs()
-                .try_into()
-                .expect("Unreachable");
+                .try_into().unwrap_or(u32::MAX);
             self.socket
                 .send_channel_window_adjust(channel.server.id, size)
                 .await?;
@@ -1682,10 +1686,10 @@ where
         want_reply: bool,
         addr: &forward::SocketAddr,
     ) -> error::Result<()> {
-
         let buffer = make_buffer_without_header! {
             u8: SSH_MSG_GLOBAL_REQUEST,
-            one: SSH_GLOBAL_REQUEST_TYPE_TCP_IP_FORWARD,
+            one: SSH_GLOBAL_REQUEST_TYPE_CANCEL_TCP_IP_FORWARD,
+            u8: want_reply.into(),
             one: &addr.host,
             u32: addr.port as u32
         };
@@ -1700,12 +1704,16 @@ where
                             tracing::warn!("Maybe forward listener not exists")
                         }
                         Ok(())
-                    },
+                    }
                     Message::RequestFailure => Err(RequestFailureSnafu.build().into()),
                     _ => return None,
                 })
             })
             .await?;
+        } else {
+            if self.forward.remove(addr).is_none() {
+                tracing::warn!("Maybe forward listener not exists")
+            }
         }
         Ok(())
     }
@@ -1928,7 +1936,7 @@ where
     }
 
     async fn send_unimplemented(&mut self) -> error::Result<()> {
-        let sequence_number = self.socket.server().sequence_number;
+        let sequence_number = self.socket.server().sequence_number.wrapping_sub(1);
         let buffer = make_buffer_without_header! {
             u8: SSH_MSG_UNIMPLEMENTED,
             u32: sequence_number,

@@ -282,7 +282,10 @@ impl Handle {
     }
 
     pub async fn enter(&mut self, permission: u16, target: &str) -> error::Result<()> {
-        let line = format!("D0{:o} 0 {}\n", permission, target);
+        let target = shlex::try_quote(target)
+            .context(InvalidTargetNameSnafu)?
+            .to_string();
+        let line = format!("D{:04o} 0 {}\n", permission, target);
         self.channel.send(line.as_bytes()).await?;
         self.channel.flush().await?;
 

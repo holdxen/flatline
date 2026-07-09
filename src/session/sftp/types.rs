@@ -213,27 +213,55 @@ pub struct FileInfo {
 }
 
 impl FileInfo {
-    fn parse(data: &[u8]) -> error::Result<Self> {
+    fn parse_more(data: &[u8], size: usize) -> error::Result<Vec<Self>> {
+        let mut result = Vec::with_capacity(size);
+
         let mut consumer = Consumer::new(data);
 
-        let file_name = consumer.consume_one()?;
-        let file_name = std::str::from_utf8(file_name)
-            .context(msg::ExpectStringSnafu)?
-            .to_string();
+        for _ in 0..size {
+            let file_name = consumer.consume_one()?;
+            let file_name = std::str::from_utf8(file_name)
+                .context(msg::ExpectStringSnafu)?
+                .to_string();
 
-        let long_name = consumer.consume_one()?;
-        let long_name = std::str::from_utf8(long_name)
-            .context(msg::ExpectStringSnafu)?
-            .to_string();
+            let long_name = consumer.consume_one()?;
+            let long_name = std::str::from_utf8(long_name)
+                .context(msg::ExpectStringSnafu)?
+                .to_string();
 
-        let attributes = Attributes::parse(consumer.peek())?;
+            let attributes = Attributes::parse(&mut consumer)?;
 
-        Ok(Self {
-            file_name,
-            long_name,
-            attributes,
-        })
+            result.push(Self {
+                file_name,
+                long_name,
+                attributes
+            });
+        }
+
+        Ok(result)
     }
+
+    // fn parse(data: &[u8]) -> error::Result<Self> {
+    //     let mut consumer = Consumer::new(data);
+
+    //     let file_name = consumer.consume_one()?;
+    //     let file_name = std::str::from_utf8(file_name)
+    //         .context(msg::ExpectStringSnafu)?
+    //         .to_string();
+
+    //     let long_name = consumer.consume_one()?;
+    //     let long_name = std::str::from_utf8(long_name)
+    //         .context(msg::ExpectStringSnafu)?
+    //         .to_string();
+
+    //     let attributes = Attributes::parse(&mut consumer)?;
+
+    //     Ok(Self {
+    //         file_name,
+    //         long_name,
+    //         attributes,
+    //     })
+    // }
 }
 
 #[derive(derive_more::Debug, Clone)]
@@ -358,11 +386,13 @@ impl Message {
             }
             SSH_FXP_NAME => {
                 let count = consumer.consume_u32()?;
-                let mut file_infos = Vec::with_capacity(count as usize);
-                for _ in 0..count {
-                    let file_info = FileInfo::parse(consumer.peek())?;
-                    file_infos.push(file_info);
-                }
+                // let mut file_infos = Vec::with_capacity(count as usize);
+                // for _ in 0..count {
+                //     let file_info = FileInfo::parse(consumer.peek())?;
+                //     file_infos.push(file_info);
+                // }
+
+                let file_infos = FileInfo::parse_more(consumer.peek(), count as usize)?;
 
                 Ok(Message {
                     id,
@@ -370,7 +400,7 @@ impl Message {
                 })
             }
             SSH_FXP_ATTRS => {
-                let attributes = Attributes::parse(consumer.peek())?;
+                let attributes = Attributes::parse(&mut consumer)?;
                 Ok(Message {
                     id,
                     payload: Payload::Attributes(attributes),
@@ -457,8 +487,7 @@ impl Attributes {
         producer.into_vec()
     }
 
-    fn parse(data: &[u8]) -> error::Result<Self> {
-        let mut consumer = Consumer::new(data);
+    fn parse(consumer: &mut Consumer<'_>) -> error::Result<Self> {
         let flags = consumer.consume_u32()?;
 
         let mut size = None;

@@ -378,7 +378,7 @@ impl<T> Dsa<T> {
 
 impl Verify for Dsa<Public> {
     fn name(&self) -> &str {
-        todo!()
+        "ssh-dss"
     }
 
     fn initialize(&mut self, key: &[u8]) -> Result<()> {

@@ -1058,9 +1058,8 @@ where
             self.client_kex_msg = Some(v);
         }
         if let Some(payload) = server_kex_msg {
-            assert_eq!(payload[0], protocol::SSH_MSG_KEXINIT);
 
-            let server_method = Methods::parse(&payload[1..])?;
+            let server_method = Methods::parse(&payload[..])?;
             let matched = self.session.config().negotiate(&server_method)?;
 
             tracing::info!("Matched methods: {:?}", matched);

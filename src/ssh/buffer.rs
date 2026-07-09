@@ -317,7 +317,7 @@ impl<'a> Consumer<'a> {
         Ok(ret)
     }
 
-    pub fn peek_u8(&mut self) -> error::Result<u8> {
+    pub fn peek_u8(&self) -> error::Result<u8> {
         if self.peek().is_empty() {
             return builder::InvalidFormat {
                 detail: "Unexpected end of buffer while reading u8",

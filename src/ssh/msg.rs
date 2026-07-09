@@ -84,6 +84,13 @@ impl Packet {
         let padding_len = consumer.consume_u8()?;
 
         let payload_len = consumer.peek().len() - padding_len as usize;
+
+        if data.len() <= padding_len as usize + 1 {
+            return Err(crate::error::builder::InvalidFormat {
+                detail: "Unexpected padding length"
+            }.build().into());
+        }
+
         let payload = consumer.consume_bytes(payload_len)?.to_vec();
 
         let padding = consumer.consume_bytes(padding_len as usize)?.to_vec();
