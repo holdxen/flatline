@@ -8,14 +8,13 @@ mod stream;
 
 const DEFAULT_CHANNEL_CAPACITY: usize = 256;
 
-
 #[cfg(test)]
 mod test {
-    use rand::RngExt;
-use serde::{Serialize, Deserialize};
-    use tokio::net::TcpStream;
     use crate::session;
     use indexmap::IndexMap;
+    use rand::RngExt;
+    use serde::{Deserialize, Serialize};
+    use tokio::net::TcpStream;
 
     #[easy_ext::ext]
     impl<K, V> IndexMap<K, V> {
@@ -49,12 +48,11 @@ use serde::{Serialize, Deserialize};
         }
     }
 
-
     #[derive(Debug, Serialize, Deserialize, Clone)]
     pub struct Config {
         general: General,
         target: Target,
-        pub authentication: Authentication
+        pub authentication: Authentication,
     }
 
     impl Config {
@@ -67,11 +65,15 @@ use serde::{Serialize, Deserialize};
         pub async fn open_session_simple(&self) -> anyhow::Result<session::Session> {
             let session = self.open_session().await?;
             session.request_authentication().await?;
-            let status = session.authenticate_password(self.authentication.username.clone(), self.authentication.password.clone()).await?;
+            let status = session
+                .authenticate_password(
+                    self.authentication.username.clone(),
+                    self.authentication.password.clone(),
+                )
+                .await?;
             anyhow::ensure!(status.success(), "Failed to authenticate with password");
             Ok(session)
         }
-
 
         pub async fn connect(&self) -> anyhow::Result<TcpStream> {
             let tcp = TcpStream::connect((self.target.host.clone(), self.target.port)).await?;
@@ -95,7 +97,10 @@ use serde::{Serialize, Deserialize};
             Ok(session)
         }
 
-        pub async fn open_session_with_config(&self, config: session::Config) -> anyhow::Result<session::Session> {
+        pub async fn open_session_with_config(
+            &self,
+            config: session::Config,
+        ) -> anyhow::Result<session::Session> {
             let stream = self.connect().await?;
 
             let notifier = session::DefaultNotifier::default();
@@ -104,10 +109,16 @@ use serde::{Serialize, Deserialize};
             Ok(session)
         }
 
-
-        pub async fn authenticate_password(&self, session: &session::Session) -> anyhow::Result<()> {
-            let status = session.authenticate_password(self.authentication.username.to_string(),
-                                                       self.authentication.password.to_string()).await?;
+        pub async fn authenticate_password(
+            &self,
+            session: &session::Session,
+        ) -> anyhow::Result<()> {
+            let status = session
+                .authenticate_password(
+                    self.authentication.username.to_string(),
+                    self.authentication.password.to_string(),
+                )
+                .await?;
 
             assert!(status.success());
             Ok(())
@@ -117,7 +128,7 @@ use serde::{Serialize, Deserialize};
     #[derive(Debug, Serialize, Deserialize, Clone)]
     pub struct Target {
         host: String,
-        port: u16
+        port: u16,
     }
 
     #[derive(Debug, Serialize, Deserialize, Clone)]

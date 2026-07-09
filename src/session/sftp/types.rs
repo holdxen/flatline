@@ -1,10 +1,16 @@
-
 use std::collections::HashMap;
 
-use snafu::ResultExt;
 use num_enum::{IntoPrimitive, TryFromPrimitive};
+use snafu::ResultExt;
 
-use crate::{error, ssh::{buffer::{Consumer, Producer}, msg, protocol::sftp::*}};
+use crate::{
+    error,
+    ssh::{
+        buffer::{Consumer, Producer},
+        msg,
+        protocol::sftp::*,
+    },
+};
 
 bitflags::bitflags! {
     // https://datatracker.ietf.org/doc/html/draft-ietf-secsh-filexfer-01#section-7.3
@@ -54,7 +60,6 @@ impl Permissions {
         Self::from_bits_retain(0o755)
     }
 }
-
 
 #[derive(Debug, Clone, Copy)]
 pub struct Statvfs {
@@ -174,15 +179,15 @@ pub enum Status {
 impl Status {
     pub(super) fn to_error(self, msg: String) -> error::Error {
         match self {
-            Status::OK =>super::UnexpectedResponseSnafu.build().into(),
-            Status::Eof =>super::UnexpectedEofSnafu { msg }.build().into(),
-            Status::NoSuchFile =>super::NoSuchFileSnafu { msg }.build().into(),
-            Status::PermissionDenied =>super::PermissionDeniedSnafu { msg }.build().into(),
-            Status::Failure =>super::FailureSnafu { msg }.build().into(),
-            Status::BadMessage =>super::BadMessageSnafu { msg }.build().into(),
-            Status::NoConnection =>super::NoConnectionSnafu { msg }.build().into(),
-            Status::ConnectionLost =>super::ConnectionLostSnafu { msg }.build().into(),
-            Status::OpUnsupported =>super::OpUnsupportedSnafu { msg }.build().into(),   
+            Status::OK => super::UnexpectedResponseSnafu.build().into(),
+            Status::Eof => super::UnexpectedEofSnafu { msg }.build().into(),
+            Status::NoSuchFile => super::NoSuchFileSnafu { msg }.build().into(),
+            Status::PermissionDenied => super::PermissionDeniedSnafu { msg }.build().into(),
+            Status::Failure => super::FailureSnafu { msg }.build().into(),
+            Status::BadMessage => super::BadMessageSnafu { msg }.build().into(),
+            Status::NoConnection => super::NoConnectionSnafu { msg }.build().into(),
+            Status::ConnectionLost => super::ConnectionLostSnafu { msg }.build().into(),
+            Status::OpUnsupported => super::OpUnsupportedSnafu { msg }.build().into(),
         }
     }
     pub(super) fn to_result(self, msg: String) -> error::Result<()> {
@@ -192,10 +197,10 @@ impl Status {
             Status::NoSuchFile => Err(super::NoSuchFileSnafu { msg }.build().into()),
             Status::PermissionDenied => Err(super::PermissionDeniedSnafu { msg }.build().into()),
             Status::Failure => Err(super::FailureSnafu { msg }.build().into()),
-            Status::BadMessage =>Err(super::BadMessageSnafu { msg }.build().into()),
-            Status::NoConnection =>Err(super::NoConnectionSnafu { msg }.build().into()),
-            Status::ConnectionLost =>Err(super::ConnectionLostSnafu { msg }.build().into()),
-            Status::OpUnsupported =>Err(super::OpUnsupportedSnafu { msg }.build().into()),   
+            Status::BadMessage => Err(super::BadMessageSnafu { msg }.build().into()),
+            Status::NoConnection => Err(super::NoConnectionSnafu { msg }.build().into()),
+            Status::ConnectionLost => Err(super::ConnectionLostSnafu { msg }.build().into()),
+            Status::OpUnsupported => Err(super::OpUnsupportedSnafu { msg }.build().into()),
         }
     }
 }
@@ -212,10 +217,14 @@ impl FileInfo {
         let mut consumer = Consumer::new(data);
 
         let file_name = consumer.consume_one()?;
-        let file_name = std::str::from_utf8(file_name).context(msg::ExpectStringSnafu)?.to_string();
+        let file_name = std::str::from_utf8(file_name)
+            .context(msg::ExpectStringSnafu)?
+            .to_string();
 
         let long_name = consumer.consume_one()?;
-        let long_name = std::str::from_utf8(long_name).context(msg::ExpectStringSnafu)?.to_string();
+        let long_name = std::str::from_utf8(long_name)
+            .context(msg::ExpectStringSnafu)?
+            .to_string();
 
         let attributes = Attributes::parse(consumer.peek())?;
 
@@ -238,7 +247,7 @@ pub(super) enum Payload {
     Data(#[debug(skip)] Vec<u8>),
     Name(Vec<FileInfo>),
     Attributes(Attributes),
-    ExtendReply(Vec<u8>)
+    ExtendReply(Vec<u8>),
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Timestamp {
@@ -276,7 +285,9 @@ impl TryFrom<u32> for PermissionsAndFileType {
     fn try_from(value: u32) -> std::result::Result<Self, Self::Error> {
         Ok(Self::new(
             Permissions::from_bits_truncate(value & Permissions::MASK),
-            (value & FileType::MASK).try_into().context(super::UnknownFileTypeSnafu)?,
+            (value & FileType::MASK)
+                .try_into()
+                .context(super::UnknownFileTypeSnafu)?,
         ))
     }
 }
@@ -301,7 +312,6 @@ pub(super) struct Message {
 
 impl Message {
     pub fn parse(data: &[u8]) -> error::Result<Message> {
-
         let mut consumer = Consumer::new(data);
         let r#type = consumer.consume_u8()?;
 
@@ -310,15 +320,18 @@ impl Message {
         match r#type {
             SSH_FXP_STATUS => {
                 let code = consumer.consume_u32()?;
-                let status = Status::try_from(code).context(super::UnexpectedStatusSnafu {
-                    status: code,
-                })?;
+                let status = Status::try_from(code)
+                    .context(super::UnexpectedStatusSnafu { status: code })?;
 
                 let error = consumer.consume_one().unwrap_or_default();
-                let error = std::str::from_utf8(error).context(msg::ExpectStringSnafu)?.to_string();
+                let error = std::str::from_utf8(error)
+                    .context(msg::ExpectStringSnafu)?
+                    .to_string();
 
                 let language = consumer.consume_one().unwrap_or_default();
-                let language = std::str::from_utf8(language).context(msg::ExpectStringSnafu)?.to_string();
+                let language = std::str::from_utf8(language)
+                    .context(msg::ExpectStringSnafu)?
+                    .to_string();
 
                 Ok(Message {
                     id,
@@ -351,25 +364,26 @@ impl Message {
                     file_infos.push(file_info);
                 }
 
-                Ok(Message { id, payload: Payload::Name(file_infos) })
+                Ok(Message {
+                    id,
+                    payload: Payload::Name(file_infos),
+                })
             }
             SSH_FXP_ATTRS => {
                 let attributes = Attributes::parse(consumer.peek())?;
-                Ok(Message { id, payload: Payload::Attributes(attributes) })
+                Ok(Message {
+                    id,
+                    payload: Payload::Attributes(attributes),
+                })
             }
-            SSH_FXP_EXTENDED_REPLY => {
-                Ok(Message { id, payload: Payload::ExtendReply(consumer.peek().to_vec()) })
-            }
-            code => {
-                Err(super::UnexpectedMessageSnafu {
-                    code
-                }.build().into())
-            }
+            SSH_FXP_EXTENDED_REPLY => Ok(Message {
+                id,
+                payload: Payload::ExtendReply(consumer.peek().to_vec()),
+            }),
+            code => Err(super::UnexpectedMessageSnafu { code }.build().into()),
         }
-
     }
 }
-
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Attributes {
@@ -381,7 +395,6 @@ pub struct Attributes {
 }
 
 impl Attributes {
-
     fn new(
         size: Option<u64>,
         user: Option<User>,
@@ -429,7 +442,7 @@ impl Attributes {
         if let Some(ref extend) = self.extend {
             flags |= SSH_FILEXFER_ATTR_EXTENDED;
 
-            let count =extend.len() as u32;
+            let count = extend.len() as u32;
 
             producer.put_u32(count);
 
@@ -438,7 +451,6 @@ impl Attributes {
                 producer.put_one(v);
             }
         }
-
 
         producer[..4].copy_from_slice(&flags.to_be_bytes());
 
@@ -487,7 +499,12 @@ impl Attributes {
                     let key = consumer.consume_one()?;
                     let value = consumer.consume_one()?;
 
-                    extend.insert(std::str::from_utf8(key).context(msg::ExpectStringSnafu)?.to_string(), value.to_vec());
+                    extend.insert(
+                        std::str::from_utf8(key)
+                            .context(msg::ExpectStringSnafu)?
+                            .to_string(),
+                        value.to_vec(),
+                    );
                 }
                 Some(extend)
             };
@@ -500,7 +517,7 @@ impl Attributes {
 #[derive(Debug, Clone)]
 pub struct File {
     handle: Vec<u8>,
-    pos: u64
+    pos: u64,
 }
 
 impl File {
@@ -526,7 +543,6 @@ impl File {
         self.pos -= offset;
     }
 }
-
 
 pub struct Directory {
     handle: Vec<u8>,

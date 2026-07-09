@@ -95,14 +95,9 @@ pub trait KeyboardInteractive: Send + Sync {
 #[derive(Debug, snafu::Snafu)]
 pub enum Error {
     #[snafu(display("Unexpected behaviour: {}", detail))]
-    UnexpectedBehaviour {
-        detail: String,
-    },
+    UnexpectedBehaviour { detail: String },
     #[snafu(display("Unexpected service: expected {}, got {}", expect, actual))]
-    UnexpectedService {
-        expect: String,
-        actual: String,
-    },
+    UnexpectedService { expect: String, actual: String },
     #[snafu(display("Channel open failure (code {}): {}", reason_code, description))]
     ChannelOpenFailure {
         reason_code: u32,
@@ -113,9 +108,7 @@ pub enum Error {
     #[snafu(display("Channel already open"))]
     ChannelAlreadyOpen,
     #[snafu(display("Unexpected message: {}", detail))]
-    UnexpectedMessage {
-        detail: String,
-    },
+    UnexpectedMessage { detail: String },
     #[snafu(display("Disconnected: {:?} - {}", reason, description))]
     Disconnected {
         reason: msg::DisconnectReason,
@@ -137,13 +130,9 @@ pub enum Error {
     UnexpectedChannelEof,
 
     #[snafu(transparent)]
-    SecureCopyProtocolError {
-        source: scp::Error,
-    },
+    SecureCopyProtocolError { source: scp::Error },
     #[snafu(transparent)]
-    SSHFileTransferProtocolError {
-        source: sftp::Error,
-    },
+    SSHFileTransferProtocolError { source: sftp::Error },
 }
 
 #[easy_ext::ext(UnexpectedSendingError)]

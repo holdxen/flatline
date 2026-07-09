@@ -17,23 +17,15 @@ use rand::RngExt;
 #[derive(Debug, snafu::Snafu)]
 pub enum Error {
     #[snafu(display("payload is too long"))]
-    PayloadTooLong {
-        maximum: usize,
-        actual: usize,
-    },
+    PayloadTooLong { maximum: usize, actual: usize },
     #[snafu(display("packet is too long"))]
-    PacketTooLong {
-        maximum: usize,
-        actual: usize,
-    },
+    PacketTooLong { maximum: usize, actual: usize },
     // #[snafu(display("padding length is incorrect"))]
     // PaddingLengthIncorrect,
     #[snafu(display("Payload is empty"))]
     PayloadIsEmpty,
     #[snafu(display("Unexpected block size: {}", size))]
-    UnexpectBlockSize {
-        size: usize,
-    },
+    UnexpectBlockSize { size: usize },
     #[snafu(display("MAC verification failed"))]
     MacVerificationFailed,
 }

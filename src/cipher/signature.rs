@@ -317,8 +317,10 @@ impl Signature for Rsa<Private> {
 
             let mut ctx = BigNumContext::new().context(builder::OpenSSL)?;
 
-            dmp1.checked_rem(&d, &p, &mut ctx).context(builder::OpenSSL)?;
-            dmq1.checked_rem(&d, &q, &mut ctx).context(builder::OpenSSL)?;
+            dmp1.checked_rem(&d, &p, &mut ctx)
+                .context(builder::OpenSSL)?;
+            dmq1.checked_rem(&d, &q, &mut ctx)
+                .context(builder::OpenSSL)?;
         }
 
         let key = RsaPrivateKeyBuilder::new(n, e, d)
@@ -631,11 +633,10 @@ impl Verify for Ecdsa<Public> {
 
         let id = key.consume_one()?;
 
-        if !self.name.ends_with(
-            std::str::from_utf8(id)
-                .ok()
-                .context(MismatchKeySnafu)?,
-        ) {
+        if !self
+            .name
+            .ends_with(std::str::from_utf8(id).ok().context(MismatchKeySnafu)?)
+        {
             return Err(MismatchKeySnafu.build().into());
         }
 

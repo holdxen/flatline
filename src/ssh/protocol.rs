@@ -11,7 +11,6 @@
 
 #![allow(dead_code)]
 
-
 #[derive(Clone, Default, Debug, Copy, PartialEq, Eq)]
 pub struct SFTPExtension {
     pub key: &'static str,
@@ -193,7 +192,6 @@ pub const EXT_INFO_SERVER: &str = "ext-info-s";
 pub const SSH_SERVICE_NAME_USER_AUTHENTICATION_SERVICE: &str = "ssh-userauth";
 pub const SSH_EXTENSION_NAME_SERVER_SIGNATURE_ALGORITHMS: &str = "server-sig-algs";
 
-
 pub const SSH_GLOBAL_REQUEST_TYPE_CANCEL_TCP_IP_FORWARD: &str = "cancel-tcpip-forward";
 
 pub const SSH_GLOBAL_REQUEST_TYPE_TCP_IP_FORWARD: &str = "tcpip-forward";
@@ -204,7 +202,6 @@ pub const SSH_CHANNEL_TYPE_AGENT_CONNECT: &str = "agent-connect";
 pub const SSH_CHANNEL_TYPE_SESSION: &str = "session";
 pub const SSH_CHANNEL_TYPE_DIRECT_TCP_IP: &str = "direct-tcpip";
 pub const SSH_CHANNEL_TYPE_X11: &str = "x11";
-
 
 pub mod openssh {
     pub const SSH_GLOBAL_REQUEST_TYPE_KEEP_ALIVE: &str = "keepalive@openssh.com";
@@ -218,7 +215,6 @@ pub mod openssh {
     // OpenSSH 扩展消息
     pub const SSH_MSG_PING: u8 = 192;
     pub const SSH_MSG_PONG: u8 = 193;
-
 }
 
 pub mod sftp {
@@ -245,7 +241,6 @@ pub mod sftp {
     pub const SSH_FXP_STAT: u8 = 17;
     pub const SSH_FXP_RENAME: u8 = 18;
     pub const SSH_FXP_READLINK: u8 = 19;
-
 
     pub const SSH_FXP_STATUS: u8 = 101;
     pub const SSH_FXP_HANDLE: u8 = 102;
@@ -299,19 +294,24 @@ pub mod sftp {
     pub const SSH_FX_CONNECTION_LOST: u32 = 7;
     pub const SSH_FX_OP_UNSUPPORTED: u32 = 8;
 
-
-
-    pub const OPENSSH_SFTP_EXT_POSIX_RENAME: SFTPExtension = SFTPExtension::new("posix-rename@openssh.com", b"1");
-    pub const OPENSSH_SFTP_EXT_STATVFS: SFTPExtension = SFTPExtension::new("statvfs@openssh.com", b"2");
-    pub const OPENSSH_SFTP_EXT_FSTATVFS: SFTPExtension = SFTPExtension::new("fstatvfs@openssh.com", b"2");
-    pub const OPENSSH_SFTP_EXT_HARDLINK: SFTPExtension = SFTPExtension::new("hardlink@openssh.com", b"1");
+    pub const OPENSSH_SFTP_EXT_POSIX_RENAME: SFTPExtension =
+        SFTPExtension::new("posix-rename@openssh.com", b"1");
+    pub const OPENSSH_SFTP_EXT_STATVFS: SFTPExtension =
+        SFTPExtension::new("statvfs@openssh.com", b"2");
+    pub const OPENSSH_SFTP_EXT_FSTATVFS: SFTPExtension =
+        SFTPExtension::new("fstatvfs@openssh.com", b"2");
+    pub const OPENSSH_SFTP_EXT_HARDLINK: SFTPExtension =
+        SFTPExtension::new("hardlink@openssh.com", b"1");
     pub const OPENSSH_SFTP_EXT_FSYNC: SFTPExtension = SFTPExtension::new("fsync@openssh.com", b"1");
-    pub const OPENSSH_SFTP_EXT_LSETSTAT: SFTPExtension  = SFTPExtension::new("lsetstat@openssh.com", b"1");
-    pub const OPENSSH_SFTP_EXT_LIMITS: SFTPExtension = SFTPExtension::new("limits@openssh.com", b"1");
-    pub const OPENSSH_SFTP_EXT_EXPAND_PATH: SFTPExtension = SFTPExtension::new("expand-path@openssh.com", b"1");
+    pub const OPENSSH_SFTP_EXT_LSETSTAT: SFTPExtension =
+        SFTPExtension::new("lsetstat@openssh.com", b"1");
+    pub const OPENSSH_SFTP_EXT_LIMITS: SFTPExtension =
+        SFTPExtension::new("limits@openssh.com", b"1");
+    pub const OPENSSH_SFTP_EXT_EXPAND_PATH: SFTPExtension =
+        SFTPExtension::new("expand-path@openssh.com", b"1");
     pub const OPENSSH_SFTP_EXT_COPY_DATA: SFTPExtension = SFTPExtension::new("copy-data", b"1");
-    pub const OPENSSH_SFTP_EXT_HOME_DIRECTORY: SFTPExtension = SFTPExtension::new("home-directory", b"1");
-    pub const OPENSSH_SFTP_EXT_USERS_GROUPS_BY_ID: SFTPExtension = SFTPExtension::new("users-groups-by-id@openssh.com", b"1");
-
-
+    pub const OPENSSH_SFTP_EXT_HOME_DIRECTORY: SFTPExtension =
+        SFTPExtension::new("home-directory", b"1");
+    pub const OPENSSH_SFTP_EXT_USERS_GROUPS_BY_ID: SFTPExtension =
+        SFTPExtension::new("users-groups-by-id@openssh.com", b"1");
 }

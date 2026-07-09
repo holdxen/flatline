@@ -1,11 +1,11 @@
-use snafu::OptionExt;
-use tokio::sync::{mpsc, oneshot};
-use tokio::sync::mpsc::error::TrySendError;
-use super::{channel, UnexpectedBehaviourSnafu, UnexpectedReceivingError, UnexpectedSendingError};
 use super::Event;
-use channel::Message as ChannelMessage;
+use super::{UnexpectedBehaviourSnafu, UnexpectedReceivingError, UnexpectedSendingError, channel};
 use crate::error;
 use crate::session::channel::Channel;
+use channel::Message as ChannelMessage;
+use snafu::OptionExt;
+use tokio::sync::mpsc::error::TrySendError;
+use tokio::sync::{mpsc, oneshot};
 
 pub const ALL: &str = "";
 pub const IPV4_ALL: &str = "0.0.0.0";
@@ -13,7 +13,6 @@ pub const IPV6_ALL: &str = "::";
 pub const LOCALHOST: &str = "localhost";
 pub const IPV4_LOCALHOST: &str = "127.0.0.1";
 pub const IPV6_LOCALHOST: &str = "::1";
-
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, Hash)]
 pub struct SocketAddr {
@@ -23,10 +22,7 @@ pub struct SocketAddr {
 
 impl SocketAddr {
     pub fn new(host: String, port: u16) -> Self {
-        Self {
-            host,
-            port,
-        }
+        Self { host, port }
     }
 }
 
@@ -40,7 +36,7 @@ pub struct Listener {
     receiver: mpsc::Receiver<(Stream, SocketAddr)>,
     sender: mpsc::Sender<Event>,
     addr: SocketAddr,
-    cancelled: bool
+    cancelled: bool,
 }
 
 impl Drop for Listener {
@@ -56,7 +52,7 @@ impl Drop for Listener {
             back: sender,
         };
 
-        if let Err(err) =  self.sender.try_send(event) {
+        if let Err(err) = self.sender.try_send(event) {
             match err {
                 TrySendError::Full(_) => {
                     tracing::info!("Failed to cancel");
@@ -74,8 +70,11 @@ impl Drop for Listener {
 }
 
 impl Listener {
-
-    pub(super) fn new(receiver: mpsc::Receiver<(Stream, SocketAddr)>, session: mpsc::Sender<Event>, addr: SocketAddr) -> Self {
+    pub(super) fn new(
+        receiver: mpsc::Receiver<(Stream, SocketAddr)>,
+        session: mpsc::Sender<Event>,
+        addr: SocketAddr,
+    ) -> Self {
         Self {
             receiver,
             sender: session,
@@ -89,9 +88,13 @@ impl Listener {
     }
 
     pub async fn accept(&mut self) -> error::Result<(Stream, SocketAddr)> {
-         let stream = self.receiver.recv().await.context(UnexpectedBehaviourSnafu {
-            detail: "Maybe session is shutdown"
-        })?;
+        let stream = self
+            .receiver
+            .recv()
+            .await
+            .context(UnexpectedBehaviourSnafu {
+                detail: "Maybe session is shutdown",
+            })?;
 
         Ok(stream)
     }
@@ -110,7 +113,6 @@ impl Listener {
         receiver.receive_next().await?
     }
 }
-
 
 pub struct Stream {
     channel: Channel,
@@ -138,9 +140,7 @@ impl Stream {
                 ChannelMessage::Eof => {
                     break Ok(Message::Eof);
                 }
-                ChannelMessage::Stdout(data) => {
-                    break Ok(Message::Bytes(data))
-                }
+                ChannelMessage::Stdout(data) => break Ok(Message::Bytes(data)),
                 ChannelMessage::Stderr(_) => {
                     tracing::warn!("Received unexpected stderr message from server");
                 }

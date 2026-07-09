@@ -13,47 +13,25 @@ use crate::ssh::stream::Error as TransportError;
 #[snafu(module(builder), context(suffix(false)), visibility(pub))]
 pub enum Error {
     #[snafu(display("Invalid format: {}", detail))]
-    InvalidFormat {
-        detail: String,
-    },
+    InvalidFormat { detail: String },
     #[snafu(transparent)]
-    TransportError {
-        source: TransportError,
-    },
+    TransportError { source: TransportError },
     #[snafu(display("IO error: {}", source))]
-    IOError {
-        source: std::io::Error,
-    },
+    IOError { source: std::io::Error },
     #[snafu(display("OpenSSL error: {}", source))]
-    OpenSSLError {
-        source: openssl::error::ErrorStack,
-    },
+    OpenSSLError { source: openssl::error::ErrorStack },
     #[snafu(display("Invalid operation: {}", detail))]
-    InvalidOperation {
-        detail: String,
-    },
+    InvalidOperation { detail: String },
     #[snafu(transparent)]
-    CipherError {
-        source: CipherError,
-    },
+    CipherError { source: CipherError },
     #[snafu(transparent)]
-    HandshakeError {
-        source: HandshakeError,
-    },
+    HandshakeError { source: HandshakeError },
     #[snafu(transparent)]
-    SessionError {
-        source: SessionError,
-    },
+    SessionError { source: SessionError },
     #[snafu(transparent)]
-    MessageError {
-        source: crate::ssh::msg::Error,
-    },
+    MessageError { source: crate::ssh::msg::Error },
     #[snafu(transparent)]
-    KeyError {
-        source: crate::key::Error,
-    },
+    KeyError { source: crate::key::Error },
     #[snafu(display("Invalid argument: {}", detail))]
-    InvalidArgument {
-        detail: String,
-    }
+    InvalidArgument { detail: String },
 }

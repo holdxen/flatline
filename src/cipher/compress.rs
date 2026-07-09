@@ -60,7 +60,7 @@ impl Encode for Never {
     fn finalize(&mut self) -> Result<Vec<u8>> {
         Ok(mem::take(&mut self.buf))
     }
-    
+
     fn name(&self) -> &str {
         "none"
     }
@@ -79,7 +79,7 @@ impl Decode for Never {
     fn finalize(&mut self) -> Result<Vec<u8>> {
         Ok(mem::take(&mut self.buf))
     }
-    
+
     fn name(&self) -> &str {
         "none"
     }
@@ -141,7 +141,7 @@ impl Encode for ZEncoder {
     fn finalize(&mut self) -> Result<Vec<u8>> {
         Ok(mem::take(&mut self.buf))
     }
-    
+
     fn name(&self) -> &str {
         self.name
     }
@@ -231,7 +231,7 @@ impl Decode for ZDecoder {
     fn finalize(&mut self) -> Result<Vec<u8>> {
         Ok(mem::take(&mut self.buf))
     }
-    
+
     fn name(&self) -> &str {
         self.name
     }

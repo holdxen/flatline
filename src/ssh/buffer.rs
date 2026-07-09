@@ -50,14 +50,12 @@ macro_rules! put_type {
     ($buffer:ident, bytes, $i:expr) => {
         $buffer.put_bytes($i)
     };
-    ($buffer:ident, one_list_u32, $i:expr) => {
-        {
-            $buffer.put_u32((4 + $i.len() * 4) as u32);
-            for &item in $i {
-                $buffer.put_u32(item);
-            }
+    ($buffer:ident, one_list_u32, $i:expr) => {{
+        $buffer.put_u32((4 + $i.len() * 4) as u32);
+        for &item in $i {
+            $buffer.put_u32(item);
         }
-    };
+    }};
 }
 
 macro_rules! make_buffer {
@@ -243,7 +241,7 @@ impl<'a> Consumer<'a> {
     pub fn len(&self) -> usize {
         self.data.len() - self.pos
     }
-    
+
     pub fn is_empty(&self) -> bool {
         assert!(self.pos <= self.data.len());
         self.len() == 0

@@ -234,7 +234,7 @@ pub(crate) enum Message<'a> {
     Unrecognized {
         code: u8,
         data: &'a [u8],
-    }
+    },
 }
 
 #[derive(Debug, snafu::Snafu)]

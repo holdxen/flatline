@@ -59,12 +59,12 @@ impl Notifier for DefaultNotifier {
         tracing::info!("x11 forward: {:?}", originator);
         false
     }
-    
+
     async fn server_host_keys(&mut self, _: &[&[u8]]) -> bool {
         tracing::info!("server host keys");
         true
     }
-    
+
     async fn agent_forward(
         &mut self,
         _: oneshot::Receiver<forward::Stream>,

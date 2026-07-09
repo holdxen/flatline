@@ -1,8 +1,8 @@
 #[macro_use]
 pub(crate) mod buffer;
 pub mod msg;
-pub(crate) mod stream;
 pub(crate) mod protocol;
+pub(crate) mod stream;
 
 pub(super) trait MultiplePrecisionInteger {
     fn to_integer(&self) -> Vec<u8>;

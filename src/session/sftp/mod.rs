@@ -15,41 +15,23 @@ pub use types::*;
 #[derive(Debug, snafu::Snafu)]
 pub enum Error {
     #[snafu(display("Unexpected EOF: {}", msg))]
-    UnexpectedEof {
-        msg: String,
-    },
+    UnexpectedEof { msg: String },
     #[snafu(display("No such file: {}", msg))]
-    NoSuchFile {
-        msg: String,
-    },
+    NoSuchFile { msg: String },
     #[snafu(display("Permission denied: {}", msg))]
-    PermissionDenied {
-        msg: String,
-    },
+    PermissionDenied { msg: String },
     #[snafu(display("Failure: {}", msg))]
-    Failure {
-        msg: String,
-    },
+    Failure { msg: String },
     #[snafu(display("Bad message: {}", msg))]
-    BadMessage {
-        msg: String,
-    },
+    BadMessage { msg: String },
     #[snafu(display("No connection: {}", msg))]
-    NoConnection {
-        msg: String,
-    },
+    NoConnection { msg: String },
     #[snafu(display("Connection lost: {}", msg))]
-    ConnectionLost {
-        msg: String,
-    },
+    ConnectionLost { msg: String },
     #[snafu(display("Operation not supported: {}", msg))]
-    OpUnsupported {
-        msg: String,
-    },
+    OpUnsupported { msg: String },
     #[snafu(display("Unexpected message code: {}", code))]
-    UnexpectedMessage {
-        code: u8,
-    },
+    UnexpectedMessage { code: u8 },
     #[snafu(display("Unknown file type: {}", source))]
     UnknownFileType {
         source: num_enum::TryFromPrimitiveError<types::FileType>,
@@ -60,10 +42,7 @@ pub enum Error {
         status: u32,
     },
     #[snafu(display("Mismatch response: expected {}, got {}", expected, got))]
-    MismatchResponse {
-        expected: u32,
-        got: u32,
-    },
+    MismatchResponse { expected: u32, got: u32 },
     #[snafu(display("Unexpected response"))]
     UnexpectedResponse {},
 }
@@ -90,7 +69,6 @@ impl From<Error> for error::Error {
         e.into()
     }
 }
-
 
 #[derive(Debug)]
 pub struct Handle {
@@ -127,7 +105,11 @@ impl Handle {
 
         let version = consumer.consume_u32()?;
         if version != VERSION {
-            tracing::warn!("SFTP version mismatch: mine={}, received={}", version, VERSION);
+            tracing::warn!(
+                "SFTP version mismatch: mine={}, received={}",
+                version,
+                VERSION
+            );
         }
 
         let mut extensions = HashMap::new();
@@ -170,50 +152,50 @@ impl Handle {
             "Server doesn't support posix rename"
         );
 
-        self.handle(|request_id| {
-            make_buffer! {
-                u8: SSH_FXP_EXTENDED,
-                u32: request_id,
-                one: OPENSSH_SFTP_EXT_POSIX_RENAME.key,
-                one: oldpath,
-                one: newpath,
-            }.into_vec()
-        }, |payload| {
-
-            match payload {
-                Payload::Status { status, error, .. } => {
-                    status.to_result(error)
-                },
-                _ => Err(UnexpectedResponseSnafu.build().into())
-            }
-
-        }).await
+        self.handle(
+            |request_id| {
+                make_buffer! {
+                    u8: SSH_FXP_EXTENDED,
+                    u32: request_id,
+                    one: OPENSSH_SFTP_EXT_POSIX_RENAME.key,
+                    one: oldpath,
+                    one: newpath,
+                }
+                .into_vec()
+            },
+            |payload| match payload {
+                Payload::Status { status, error, .. } => status.to_result(error),
+                _ => Err(UnexpectedResponseSnafu.build().into()),
+            },
+        )
+        .await
     }
-
 
     pub fn is_statvfs_supported(&self) -> bool {
         self.supported(OPENSSH_SFTP_EXT_STATVFS)
     }
     pub async fn statvfs(&mut self, path: &str) -> error::Result<Statvfs> {
-        debug_assert!(self.is_statvfs_supported(), "Server doesn't support statvfs");
-        self.handle(|request_id| {
-            make_buffer! {
-                u8: SSH_FXP_EXTENDED,
-                u32: request_id,
-                one: OPENSSH_SFTP_EXT_STATVFS.key,
-                one: path,
-            }.into_vec()
-        }, |payload| {
-            match payload {
-                Payload::Status { status, error, .. } => {
-                    Err(status.to_error(error))
-                },
-                Payload::ExtendReply(data) => {
-                    Statvfs::parse(&data)
-                },
-                _ => Err(UnexpectedResponseSnafu.build().into())
-            }
-        }).await
+        debug_assert!(
+            self.is_statvfs_supported(),
+            "Server doesn't support statvfs"
+        );
+        self.handle(
+            |request_id| {
+                make_buffer! {
+                    u8: SSH_FXP_EXTENDED,
+                    u32: request_id,
+                    one: OPENSSH_SFTP_EXT_STATVFS.key,
+                    one: path,
+                }
+                .into_vec()
+            },
+            |payload| match payload {
+                Payload::Status { status, error, .. } => Err(status.to_error(error)),
+                Payload::ExtendReply(data) => Statvfs::parse(&data),
+                _ => Err(UnexpectedResponseSnafu.build().into()),
+            },
+        )
+        .await
     }
 
     pub fn is_fstatvfs_supported(&self) -> bool {
@@ -221,24 +203,28 @@ impl Handle {
     }
 
     pub async fn fstatvfs(&mut self, file: &File) -> error::Result<Statvfs> {
-        debug_assert!(self.is_fstatvfs_supported(), "Server doesn't support fstatvfs");
+        debug_assert!(
+            self.is_fstatvfs_supported(),
+            "Server doesn't support fstatvfs"
+        );
 
-        self.handle(|request_id| {
-            make_buffer! {
-                u8: SSH_FXP_EXTENDED,
-                u32: request_id,
-                one: OPENSSH_SFTP_EXT_FSTATVFS.key,
-                one: file.handle(),
-            }.into_vec()
-        }, |payload| {
-            match payload {
-                Payload::Status { status, error, .. } => {
-                    Err(status.to_error(error))
-                },
+        self.handle(
+            |request_id| {
+                make_buffer! {
+                    u8: SSH_FXP_EXTENDED,
+                    u32: request_id,
+                    one: OPENSSH_SFTP_EXT_FSTATVFS.key,
+                    one: file.handle(),
+                }
+                .into_vec()
+            },
+            |payload| match payload {
+                Payload::Status { status, error, .. } => Err(status.to_error(error)),
                 Payload::ExtendReply(data) => Statvfs::parse(&data),
-                _ => Err(UnexpectedResponseSnafu.build().into())
-            }
-        }).await
+                _ => Err(UnexpectedResponseSnafu.build().into()),
+            },
+        )
+        .await
     }
 
     pub fn is_hardlink_supported(&self) -> bool {
@@ -246,25 +232,28 @@ impl Handle {
     }
 
     pub async fn hardlink(&mut self, oldpath: &str, newpath: &str) -> error::Result<()> {
-        debug_assert!(self.is_hardlink_supported(), "Server doesn't support hardlink");
+        debug_assert!(
+            self.is_hardlink_supported(),
+            "Server doesn't support hardlink"
+        );
 
-        self.handle(|request_id| {
-            make_buffer! {
-                u8: SSH_FXP_EXTENDED,
-                u32: request_id,
-                one: OPENSSH_SFTP_EXT_HARDLINK.key,
-                one: oldpath,
-                one: newpath,
-            }.into_vec()
-        },  |payload| {
-
-            match payload {
-                Payload::Status { status, error, .. } => {
-                    status.to_result(error)
-                },
-                _ => Err(UnexpectedResponseSnafu.build().into())
-            }
-        }).await
+        self.handle(
+            |request_id| {
+                make_buffer! {
+                    u8: SSH_FXP_EXTENDED,
+                    u32: request_id,
+                    one: OPENSSH_SFTP_EXT_HARDLINK.key,
+                    one: oldpath,
+                    one: newpath,
+                }
+                .into_vec()
+            },
+            |payload| match payload {
+                Payload::Status { status, error, .. } => status.to_result(error),
+                _ => Err(UnexpectedResponseSnafu.build().into()),
+            },
+        )
+        .await
     }
 
     pub fn is_fsync_supported(&self) -> bool {
@@ -274,137 +263,143 @@ impl Handle {
     pub async fn fsync(&mut self, file: &File) -> error::Result<()> {
         debug_assert!(self.is_fsync_supported(), "Server doesn't support fsync");
 
-        self.handle(|request_id| {
-            make_buffer! {
-                u8: SSH_FXP_EXTENDED,
-                u32: request_id,
-                one: OPENSSH_SFTP_EXT_FSYNC.key,
-                one: file.handle(),
-            }.into_vec()
-        }, |payload| {
-            match payload {
-                Payload::Status { status, error, .. } => {
-                    status.to_result(error)
-                },
-                _ => Err(UnexpectedResponseSnafu.build().into())
-            }
-        }).await
-        
+        self.handle(
+            |request_id| {
+                make_buffer! {
+                    u8: SSH_FXP_EXTENDED,
+                    u32: request_id,
+                    one: OPENSSH_SFTP_EXT_FSYNC.key,
+                    one: file.handle(),
+                }
+                .into_vec()
+            },
+            |payload| match payload {
+                Payload::Status { status, error, .. } => status.to_result(error),
+                _ => Err(UnexpectedResponseSnafu.build().into()),
+            },
+        )
+        .await
     }
 
     pub fn is_lsetstat_supported(&self) -> bool {
         self.supported(OPENSSH_SFTP_EXT_LSETSTAT)
     }
 
-
     pub async fn lsetstat(&mut self, path: &str, attrs: &Attributes) -> error::Result<()> {
         debug_assert!(self.is_lsetstat_supported(), "Server doesn't lsetstat");
 
-        self.handle(|request_id| {
-            make_buffer! {
-                u8: SSH_FXP_EXTENDED,
-                u32: request_id,
-                one: OPENSSH_SFTP_EXT_LSETSTAT.key,
-                one: path,
-                bytes: attrs.to_bytes(),
-            }.into_vec()
-        }, |payload| {
-            match payload {
-                Payload::Status { status, error, .. } =>  {
-                    status.to_result(error)
-                },
-                _ => Err(UnexpectedResponseSnafu.build().into())
-            }
-        }).await
+        self.handle(
+            |request_id| {
+                make_buffer! {
+                    u8: SSH_FXP_EXTENDED,
+                    u32: request_id,
+                    one: OPENSSH_SFTP_EXT_LSETSTAT.key,
+                    one: path,
+                    bytes: attrs.to_bytes(),
+                }
+                .into_vec()
+            },
+            |payload| match payload {
+                Payload::Status { status, error, .. } => status.to_result(error),
+                _ => Err(UnexpectedResponseSnafu.build().into()),
+            },
+        )
+        .await
     }
-
 
     pub fn is_limits_supported(&self) -> bool {
         self.supported(OPENSSH_SFTP_EXT_LIMITS)
     }
 
-    pub async fn limits(&mut self) -> error::Result<Limits>  {
+    pub async fn limits(&mut self) -> error::Result<Limits> {
         debug_assert!(self.is_limits_supported(), "Server doesn't support limits");
 
-        self.handle(|request_id| {
-            make_buffer! {
-                u8: SSH_FXP_EXTENDED,
-                u32: request_id,
-                one: OPENSSH_SFTP_EXT_LIMITS.key
-            }.into_vec()
-        }, |payload| {
-            match payload {
+        self.handle(
+            |request_id| {
+                make_buffer! {
+                    u8: SSH_FXP_EXTENDED,
+                    u32: request_id,
+                    one: OPENSSH_SFTP_EXT_LIMITS.key
+                }
+                .into_vec()
+            },
+            |payload| match payload {
                 Payload::ExtendReply(data) => Limits::parse(&data),
-                _ => Err(UnexpectedResponseSnafu.build().into())
-            }
-        }).await
+                _ => Err(UnexpectedResponseSnafu.build().into()),
+            },
+        )
+        .await
     }
 
     pub fn is_expand_path_supported(&self) -> bool {
         self.supported(OPENSSH_SFTP_EXT_EXPAND_PATH)
     }
 
-    pub async fn expand_path(&mut self, path: &str) -> error::Result<String>  {
+    pub async fn expand_path(&mut self, path: &str) -> error::Result<String> {
         debug_assert!(
             self.is_expand_path_supported(),
             "Server doesn't support expand path"
         );
 
-        self.handle(|request_id| {
-            make_buffer! {
-                u8: SSH_FXP_EXTENDED,
-                u32: request_id,
-                one: OPENSSH_SFTP_EXT_EXPAND_PATH.key,
-                one: path
-            }.into_vec()
-        }, |payload| {
-            match payload {
-                Payload::Status { status, error, .. } => {
-                    Err(status.to_error(error))
-                },
+        self.handle(
+            |request_id| {
+                make_buffer! {
+                    u8: SSH_FXP_EXTENDED,
+                    u32: request_id,
+                    one: OPENSSH_SFTP_EXT_EXPAND_PATH.key,
+                    one: path
+                }
+                .into_vec()
+            },
+            |payload| match payload {
+                Payload::Status { status, error, .. } => Err(status.to_error(error)),
                 Payload::Name(file_infos) => {
                     if file_infos.is_empty() {
-                        return Err(UnexpectedResponseSnafu {
-                        }.build().into());
+                        return Err(UnexpectedResponseSnafu {}.build().into());
                     }
                     Ok(file_infos[0].file_name.clone())
-                },
-                _ => {
-                    Err(UnexpectedResponseSnafu.build().into())
                 }
-            }
-        }).await
+                _ => Err(UnexpectedResponseSnafu.build().into()),
+            },
+        )
+        .await
     }
 
     pub fn is_copy_data_supported(&self) -> bool {
         self.supported(OPENSSH_SFTP_EXT_COPY_DATA)
     }
 
-    pub async fn copy_data(&mut self, read: &mut File, len: u64, write: &mut File) -> error::Result<()>  {
-        debug_assert!(self.is_copy_data_supported(), "Server doesn't support copy data");
+    pub async fn copy_data(
+        &mut self,
+        read: &mut File,
+        len: u64,
+        write: &mut File,
+    ) -> error::Result<()> {
+        debug_assert!(
+            self.is_copy_data_supported(),
+            "Server doesn't support copy data"
+        );
 
-        self.handle(|request_id| {
-            make_buffer! {
-            u8: SSH_FXP_EXTENDED,
-            u32: request_id,
-            one: OPENSSH_SFTP_EXT_COPY_DATA.key,
-            one: &read.handle(),
-            u64: read.pos(),
-            u64: len,
-            one: &write.handle(),
-            u64: write.pos(),
-        }.into_vec()
-        }, |payload| {
-            match payload {
-                Payload::Status { status, error, .. } => {
-                    status.to_result(error)
-                },
-                _ => {
-                    Err(UnexpectedResponseSnafu.build().into())
+        self.handle(
+            |request_id| {
+                make_buffer! {
+                    u8: SSH_FXP_EXTENDED,
+                    u32: request_id,
+                    one: OPENSSH_SFTP_EXT_COPY_DATA.key,
+                    one: &read.handle(),
+                    u64: read.pos(),
+                    u64: len,
+                    one: &write.handle(),
+                    u64: write.pos(),
                 }
-            }
-        }).await
-
+                .into_vec()
+            },
+            |payload| match payload {
+                Payload::Status { status, error, .. } => status.to_result(error),
+                _ => Err(UnexpectedResponseSnafu.build().into()),
+            },
+        )
+        .await
     }
 
     pub fn is_home_directory_supported(&self) -> bool {
@@ -417,59 +412,64 @@ impl Handle {
             "Server doesn't support home directory"
         );
 
-        self.handle(|request_id| {
-            make_buffer! {
-                u8: SSH_FXP_EXTENDED,
-                u32: request_id,
-                one: OPENSSH_SFTP_EXT_HOME_DIRECTORY.key,
-                one: username
-            }.into_vec()
-        }, |payload| {
-            match payload {
-                Payload::Status { status, error, .. } => {
-                    Err(status.to_error(error))
-                },
+        self.handle(
+            |request_id| {
+                make_buffer! {
+                    u8: SSH_FXP_EXTENDED,
+                    u32: request_id,
+                    one: OPENSSH_SFTP_EXT_HOME_DIRECTORY.key,
+                    one: username
+                }
+                .into_vec()
+            },
+            |payload| match payload {
+                Payload::Status { status, error, .. } => Err(status.to_error(error)),
                 Payload::Name(file_infos) => {
                     if file_infos.is_empty() {
-                        return Err(UnexpectedResponseSnafu {
-                        }.build().into());
+                        return Err(UnexpectedResponseSnafu {}.build().into());
                     }
                     Ok(file_infos[0].file_name.clone())
-                },
-                _ => {
-                    Err(UnexpectedResponseSnafu.build().into())
                 }
-            }
-        }).await
+                _ => Err(UnexpectedResponseSnafu.build().into()),
+            },
+        )
+        .await
     }
 
     pub fn is_users_groups_by_id_supported(&self) -> bool {
         self.supported(OPENSSH_SFTP_EXT_USERS_GROUPS_BY_ID)
     }
-    pub async fn users_groups_by_id(&mut self, users: &[u32], groups: &[u32]) -> error::Result<(Vec<String>, Vec<String>)> {
-        debug_assert!(self.is_users_groups_by_id_supported(), "Server doesn't support users-groups-by-id");
-        
-        self.handle(|request_id| {
-            make_buffer! {
-                u8: SSH_FXP_EXTENDED,
-                u32: request_id,
-                one: OPENSSH_SFTP_EXT_USERS_GROUPS_BY_ID.key,
-                one_list_u32: users,
-                one_list_u32: groups
-            }.into_vec()
-        }, |payload| {
+    pub async fn users_groups_by_id(
+        &mut self,
+        users: &[u32],
+        groups: &[u32],
+    ) -> error::Result<(Vec<String>, Vec<String>)> {
+        debug_assert!(
+            self.is_users_groups_by_id_supported(),
+            "Server doesn't support users-groups-by-id"
+        );
 
-            match payload {
-                Payload::Status { status, error, .. } => {
-                    Err(status.to_error(error))
-                },
+        self.handle(
+            |request_id| {
+                make_buffer! {
+                    u8: SSH_FXP_EXTENDED,
+                    u32: request_id,
+                    one: OPENSSH_SFTP_EXT_USERS_GROUPS_BY_ID.key,
+                    one_list_u32: users,
+                    one_list_u32: groups
+                }
+                .into_vec()
+            },
+            |payload| match payload {
+                Payload::Status { status, error, .. } => Err(status.to_error(error)),
                 Payload::ExtendReply(data) => {
                     let mut consumer = Consumer::new(&data);
                     let usernames = {
                         let mut consumer = Consumer::new(consumer.consume_one()?);
                         let mut usernames = Vec::with_capacity(users.len());
                         while !consumer.is_empty() {
-                            let name = std::str::from_utf8(consumer.consume_one()?).context(msg::ExpectStringSnafu)?;
+                            let name = std::str::from_utf8(consumer.consume_one()?)
+                                .context(msg::ExpectStringSnafu)?;
                             usernames.push(name.to_string());
                         }
                         usernames
@@ -479,24 +479,26 @@ impl Handle {
                         let mut consumer = Consumer::new(consumer.consume_one()?);
                         let mut groupnames = Vec::with_capacity(users.len());
                         while !consumer.is_empty() {
-                            let name = std::str::from_utf8(consumer.consume_one()?).context(msg::ExpectStringSnafu)?;
+                            let name = std::str::from_utf8(consumer.consume_one()?)
+                                .context(msg::ExpectStringSnafu)?;
                             groupnames.push(name.to_string());
                         }
                         groupnames
                     };
 
                     Ok((usernames, groupnames))
-                },
-                _ => Err(UnexpectedResponseSnafu.build().into())
-            }
-        }).await
-
+                }
+                _ => Err(UnexpectedResponseSnafu.build().into()),
+            },
+        )
+        .await
     }
 
     async fn receive_msg(&mut self, request_id: u32) -> error::Result<Message> {
         let len = self.channel.fill_exact(4).await?;
         let len = u32::from_be_bytes(len.try_into().unwrap());
-        if len > 1024 * 1024 * 1024 { // 1G max
+        if len > 1024 * 1024 * 1024 {
+            // 1G max
             tracing::error!("SFTP packet is too long: {}", len);
             return Err(UnexpectedResponseSnafu.build().into());
         }

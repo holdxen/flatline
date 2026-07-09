@@ -1066,7 +1066,12 @@ where
             error_message: error_message.to_string(),
         };
 
-        if channel.sender.send(channel::Message::Exit(status)).await.is_err() {
+        if channel
+            .sender
+            .send(channel::Message::Exit(status))
+            .await
+            .is_err()
+        {
             tracing::error!("Failed to send exit status");
         }
 

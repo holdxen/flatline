@@ -32,17 +32,11 @@ pub enum Error {
     #[snafu(display("Banner too long"))]
     BannerTooLong,
     #[snafu(display("Unsupported SSH version: {}", version))]
-    UnsupportedVersion {
-        version: String,
-    },
+    UnsupportedVersion { version: String },
     #[snafu(display("Invalid banner: {}", source))]
-    InvalidBanner {
-        source: Utf8Error,
-    },
+    InvalidBanner { source: Utf8Error },
     #[snafu(display("Invalid string: {}", source))]
-    InvalidString {
-        source: Utf8Error,
-    },
+    InvalidString { source: Utf8Error },
     #[snafu(display("Negotiation failed"))]
     NegotiationFailed,
     #[snafu(display("Signature verification failed"))]
@@ -50,18 +44,14 @@ pub enum Error {
     #[snafu(display("Server host key rejected by user"))]
     ServerHostKeyRejectedByUser,
     #[snafu(display("Unexpected message in strict mode: code {}", code))]
-    UnexpectedMessageInStrictMode {
-        code: u8,
-    },
+    UnexpectedMessageInStrictMode { code: u8 },
     #[snafu(display("Unexpected disconnect message: {:?} - {}", reason, description))]
     UnexpectedDisconnectMessage {
         reason: DisconnectReason,
         description: String,
     },
     #[snafu(display("Unexpected server banner: {}", banner))]
-    UnexpectedServerBanner {
-        banner: String,
-    },
+    UnexpectedServerBanner { banner: String },
 }
 
 pub struct Handshaker<T, N>
@@ -1056,8 +1046,10 @@ where
     ) -> error::Result<()> {
         let mut client_methods = Methods::from_config(self.session.config());
 
-        client_methods.do_compat(!self.session.config().disable_compat && self.session.compat_options().curve25519_pad);
-        
+        client_methods.do_compat(
+            !self.session.config().disable_compat && self.session.compat_options().curve25519_pad,
+        );
+
         tracing::info!("Client methods: {:?}", client_methods);
 
         {

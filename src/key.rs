@@ -118,14 +118,10 @@ pub enum Error {
     WrongPassphrase,
 
     #[snafu(display("Unsupported key type: {}", r#type))]
-    UnsupportedKeyType {
-        r#type: String,
-    },
+    UnsupportedKeyType { r#type: String },
 
     #[snafu(display("Failed to decrypt key: {}", source))]
-    DecryptionError {
-        source: bcrypt_pbkdf::Error,
-    },
+    DecryptionError { source: bcrypt_pbkdf::Error },
 
     #[snafu(display("Format error: {}", detail))]
     FormatError {
@@ -134,17 +130,11 @@ pub enum Error {
         location: snafu::Location,
     },
     #[snafu(display("Unsupported feature: {}", detail))]
-    UnsupportedFeature {
-        detail: String,
-    },
+    UnsupportedFeature { detail: String },
     #[snafu(display("Unsupported algorithm: {}", detail))]
-    UnsupportedAlgorithm {
-        detail: String,
-    },
+    UnsupportedAlgorithm { detail: String },
     #[snafu(display("Text error: {}", source))]
-    TextError {
-        source: Utf8Error,
-    },
+    TextError { source: Utf8Error },
 }
 
 pub struct Parser {
