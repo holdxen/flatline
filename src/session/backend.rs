@@ -3,7 +3,6 @@ use std::collections::HashMap;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::{mpsc, oneshot};
 
-use crate::DEFAULT_CHANNEL_CAPACITY;
 use crate::error::builder;
 use crate::session::channel::{IdentityPair, TtyOpcode};
 use crate::session::{
@@ -11,6 +10,7 @@ use crate::session::{
 };
 use crate::ssh::buffer::Consumer;
 use crate::ssh::msg::{Message, Signal};
+use crate::{DEFAULT_CHANNEL_CAPACITY, ssh};
 use crate::{
     error,
     session::channel,
@@ -740,11 +740,11 @@ where
                     // let mut response = async || {
                     let mut consumer = Consumer::new(&data[1..]);
                     let name = consumer.consume_one()?;
-                    let name = std::str::from_utf8(name).context(msg::ExpectStringSnafu)?;
+                    let name = std::str::from_utf8(name).context(ssh::ExpectStringSnafu)?;
 
                     let instruction = consumer.consume_one()?;
                     let instruction =
-                        std::str::from_utf8(instruction).context(msg::ExpectStringSnafu)?;
+                        std::str::from_utf8(instruction).context(ssh::ExpectStringSnafu)?;
 
                     let _lang = consumer.consume_one()?;
                     let size = consumer.consume_u32()?;
@@ -754,7 +754,7 @@ where
                     for _ in 0..size {
                         let content = consumer.consume_one()?;
                         let content =
-                            std::str::from_utf8(content).context(msg::ExpectStringSnafu)?;
+                            std::str::from_utf8(content).context(ssh::ExpectStringSnafu)?;
                         let echo = consumer.consume_u8()? != 0;
                         prompts.push(super::Prompt { content, echo })
                     }

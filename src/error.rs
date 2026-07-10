@@ -7,7 +7,7 @@ pub fn ok<T>(t: T) -> Result<T> {
 use crate::cipher::Error as CipherError;
 use crate::session::Error as SessionError;
 use crate::session::HandshakeError;
-use crate::ssh::stream::Error as TransportError;
+use crate::ssh::Error as TransportError;
 
 #[derive(Debug, snafu::Snafu)]
 #[snafu(module(builder), context(suffix(false)), visibility(pub))]
@@ -28,8 +28,6 @@ pub enum Error {
     HandshakeError { source: HandshakeError },
     #[snafu(transparent)]
     SessionError { source: SessionError },
-    #[snafu(transparent)]
-    MessageError { source: crate::ssh::msg::Error },
     #[snafu(transparent)]
     KeyError { source: crate::key::Error },
     #[snafu(display("Invalid argument: {}", detail))]

@@ -1017,7 +1017,7 @@ pub struct BufferChannel {
 }
 
 impl BufferChannel {
-    pub(super) fn new(channel: channel::Channel) -> Self {
+    pub fn new(channel: channel::Channel) -> Self {
         Self {
             channel,
             write_buf: Default::default(),

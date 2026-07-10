@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::str::Utf8Error;
 
 use super::*;
 use crate::error;
@@ -243,13 +242,6 @@ pub(crate) enum Message<'a> {
         code: u8,
         data: &'a [u8],
     },
-}
-
-#[derive(Debug, snafu::Snafu)]
-#[snafu(visibility(pub(crate)))]
-pub enum Error {
-    #[snafu(display("Expected string: {}", source))]
-    ExpectString { source: Utf8Error },
 }
 
 impl<'a> Message<'a> {

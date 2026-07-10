@@ -6,8 +6,8 @@ use snafu::ResultExt;
 use crate::{
     error,
     ssh::{
+        self,
         buffer::{Consumer, Producer},
-        msg,
         protocol::sftp::*,
     },
 };
@@ -221,12 +221,12 @@ impl FileInfo {
         for _ in 0..size {
             let file_name = consumer.consume_one()?;
             let file_name = std::str::from_utf8(file_name)
-                .context(msg::ExpectStringSnafu)?
+                .context(ssh::ExpectStringSnafu)?
                 .to_string();
 
             let long_name = consumer.consume_one()?;
             let long_name = std::str::from_utf8(long_name)
-                .context(msg::ExpectStringSnafu)?
+                .context(ssh::ExpectStringSnafu)?
                 .to_string();
 
             let attributes = Attributes::parse(&mut consumer)?;
@@ -353,12 +353,12 @@ impl Message {
 
                 let error = consumer.consume_one().unwrap_or_default();
                 let error = std::str::from_utf8(error)
-                    .context(msg::ExpectStringSnafu)?
+                    .context(ssh::ExpectStringSnafu)?
                     .to_string();
 
                 let language = consumer.consume_one().unwrap_or_default();
                 let language = std::str::from_utf8(language)
-                    .context(msg::ExpectStringSnafu)?
+                    .context(ssh::ExpectStringSnafu)?
                     .to_string();
 
                 Ok(Message {
@@ -530,7 +530,7 @@ impl Attributes {
 
                     extend.insert(
                         std::str::from_utf8(key)
-                            .context(msg::ExpectStringSnafu)?
+                            .context(ssh::ExpectStringSnafu)?
                             .to_string(),
                         value.to_vec(),
                     );

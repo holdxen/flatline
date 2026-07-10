@@ -61,7 +61,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 | Category | Algorithms |
 |----------|------------|
-| **Key Exchange** | curve25519-sha256, ecdh-sha2-nistp256/384/521, diffie-hellman-group14/16/18 |
+| **Key Exchange** | mlkem768x25519-sha256, curve25519-sha256, ecdh-sha2-nistp256/384/521, diffie-hellman-group14/16/18 |
 | **Host Key** | ssh-ed25519, rsa-sha2-256/512, ecdsa-sha2-nistp256/384/521 |
 | **Encryption** | chacha20-poly1305, aes256-gcm, aes128-gcm, aes256/192/128-ctr/cbc |
 | **MAC** | hmac-sha2-512/256, hmac-sha1, hmac-md5 (with ETM variants) |

@@ -14,25 +14,7 @@ use crate::{
 };
 use rand::RngExt;
 
-#[derive(Debug, snafu::Snafu)]
-pub enum Error {
-    #[snafu(display("payload is too long"))]
-    PayloadTooLong { maximum: usize, actual: usize },
-    #[snafu(display("packet is too long"))]
-    PacketTooLong { maximum: usize, actual: usize },
-    // #[snafu(display("padding length is incorrect"))]
-    // PaddingLengthIncorrect,
-    #[snafu(display("Payload is empty"))]
-    PayloadIsEmpty,
-    #[snafu(display("Unexpected block size: {}", size))]
-    UnexpectBlockSize { size: usize },
-    #[snafu(display("MAC verification failed"))]
-    MacVerificationFailed,
-    #[snafu(display("Unexpected padding length"))]
-    UnexpectedPaddingLength,
-}
-
-pub trait Stream: Send {
+pub(crate) trait Stream: Send {
     fn send_payload(&mut self, payload: &[u8]) -> impl Future<Output = error::Result<()>> + Send;
     fn recv_packet(&mut self) -> impl Future<Output = error::Result<msg::Packet>> + Send;
 }

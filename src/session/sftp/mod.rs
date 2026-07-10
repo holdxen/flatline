@@ -1,10 +1,9 @@
-use crate::error;
 use crate::session::channel::{BufferChannel, Channel};
 use crate::ssh::buffer::Consumer;
 use crate::ssh::buffer::*;
-use crate::ssh::msg;
 use crate::ssh::protocol::SFTPExtension;
 use crate::ssh::protocol::sftp::*;
+use crate::{error, ssh};
 use snafu::ResultExt;
 use std::collections::HashMap;
 
@@ -121,7 +120,7 @@ impl Handle {
         let mut extensions = HashMap::new();
         while !consumer.is_empty() {
             let k = consumer.consume_one()?;
-            let k = std::str::from_utf8(k).context(msg::ExpectStringSnafu)?;
+            let k = std::str::from_utf8(k).context(ssh::ExpectStringSnafu)?;
             let v = consumer.consume_one()?;
 
             extensions.insert(k.to_string(), v.to_vec());
@@ -475,7 +474,7 @@ impl Handle {
                         let mut usernames = Vec::with_capacity(users.len());
                         while !consumer.is_empty() {
                             let name = std::str::from_utf8(consumer.consume_one()?)
-                                .context(msg::ExpectStringSnafu)?;
+                                .context(ssh::ExpectStringSnafu)?;
                             usernames.push(name.to_string());
                         }
                         usernames
@@ -486,7 +485,7 @@ impl Handle {
                         let mut groupnames = Vec::with_capacity(groups.len());
                         while !consumer.is_empty() {
                             let name = std::str::from_utf8(consumer.consume_one()?)
-                                .context(msg::ExpectStringSnafu)?;
+                                .context(ssh::ExpectStringSnafu)?;
                             groupnames.push(name.to_string());
                         }
                         groupnames
