@@ -30,7 +30,7 @@ regex = "1"
 snafu = "0.9"
 tokio = { version = "1", features = ["macros", "sync", "io-util", "rt"] }
 tracing = { version = "0.1" }
-flatline-umac = { git = "https://github.com/holdxen/umac.git", rev = "fb8eb2d90afc37e7e18a5aeea8a0cdf6ef2560fc", version = "0.1", optional = true }
+umac = { package = "flatline-umac", git = "https://github.com/holdxen/umac.git", rev = "fb8eb2d90afc37e7e18a5aeea8a0cdf6ef2560fc", version = "0.1", optional = true }
 shlex = "2.0"
 bitflags = "2.13"
 num_enum = "0.7"
@@ -48,7 +48,7 @@ walkdir = "2.5.0"
 
 
 [features]
-umac = ["dep:flatline-umac"]
+umac = ["dep:umac"]
 strict = []
 openssl-v101 = ["openssl/v101"]
 openssl-v102 = ["openssl/v102"]
