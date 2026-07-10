@@ -87,8 +87,9 @@ impl Packet {
 
         if data.len() <= padding_len as usize + 1 {
             return Err(crate::error::builder::InvalidFormat {
-                detail: "Unexpected padding length"
-            }.build().into());
+                detail: "Unexpected padding length",
+            }
+            .build());
         }
 
         let payload = consumer.consume_bytes(payload_len)?.to_vec();

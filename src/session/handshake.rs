@@ -1058,7 +1058,6 @@ where
             self.client_kex_msg = Some(v);
         }
         if let Some(payload) = server_kex_msg {
-
             let server_method = Methods::parse(&payload[..])?;
             let matched = self.session.config().negotiate(&server_method)?;
 

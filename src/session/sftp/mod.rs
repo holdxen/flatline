@@ -94,7 +94,7 @@ impl Handle {
         let len = channel.fill_exact(4).await?;
 
         let len = u32::from_be_bytes(len.try_into().unwrap());
-        
+
         if len > Self::MAX_PACKET_SIZE {
             tracing::error!("Packet is too long");
             return Err(UnexpectedResponseSnafu.build().into());
@@ -876,7 +876,7 @@ impl Handle {
         match msg.payload {
             Payload::Status { status, error, .. } => {
                 if let Err(error) = status.to_result(error) {
-                    return Err(error)
+                    return Err(error);
                 }
                 file.forward(data.len() as u64);
                 Ok(())

@@ -1283,7 +1283,8 @@ where
                 .client
                 .used_window_size
                 .unsigned_abs()
-                .try_into().unwrap_or(u32::MAX);
+                .try_into()
+                .unwrap_or(u32::MAX);
             self.socket
                 .send_channel_window_adjust(channel.server.id, size)
                 .await?;

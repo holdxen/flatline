@@ -234,7 +234,7 @@ impl FileInfo {
             result.push(Self {
                 file_name,
                 long_name,
-                attributes
+                attributes,
             });
         }
 

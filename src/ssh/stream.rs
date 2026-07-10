@@ -29,7 +29,7 @@ pub enum Error {
     #[snafu(display("MAC verification failed"))]
     MacVerificationFailed,
     #[snafu(display("Unexpected padding length"))]
-    UnexpectedPaddingLength
+    UnexpectedPaddingLength,
 }
 
 pub trait Stream: Send {
@@ -811,7 +811,7 @@ where
                         if length <= padding_len as u32 + 1 {
                             return Err(UnexpectedPaddingLengthSnafu.build().into());
                         }
-                        
+
                         let content =
                             consumer.consume_bytes(length as usize - 1 - padding_len as usize)?;
 

@@ -5,10 +5,10 @@ pub mod ssh;
 pub mod key;
 pub mod session;
 mod stream;
-pub use session::sftp;
 pub use session::channel;
-pub use session::scp;
 pub use session::forward;
+pub use session::scp;
+pub use session::sftp;
 
 const DEFAULT_CHANNEL_CAPACITY: usize = 256;
 
