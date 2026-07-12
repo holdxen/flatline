@@ -874,9 +874,7 @@ impl Handle {
 
         match msg.payload {
             Payload::Status { status, error, .. } => {
-                if let Err(error) = status.to_result(error) {
-                    return Err(error);
-                }
+                status.to_result(error)?;
                 file.forward(data.len() as u64);
                 Ok(())
             }

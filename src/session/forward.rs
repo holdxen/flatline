@@ -32,27 +32,66 @@ pub enum Message {
     Bytes(Vec<u8>),
 }
 
-pub struct Listener {
-    receiver: mpsc::Receiver<(Stream, SocketAddr)>,
+pub struct Listener<A: 'static, B> {
+    receiver: mpsc::Receiver<(Stream, B)>,
     sender: mpsc::Sender<Event>,
-    addr: SocketAddr,
+    addr: A,
     cancelled: bool,
 }
 
-impl Drop for Listener {
+impl<A: 'static, B> Drop for Listener<A, B> {
     fn drop(&mut self) {
         if self.cancelled {
             return;
         }
 
+        do_drop(&self.addr, &self.sender.clone());
+    }
+}
+
+impl<A: 'static, B> Listener<A, B> {
+    pub(super) fn new(
+        receiver: mpsc::Receiver<(Stream, B)>,
+        session: mpsc::Sender<Event>,
+        addr: A,
+    ) -> Self {
+        Self {
+            receiver,
+            sender: session,
+            addr,
+            cancelled: false,
+        }
+    }
+
+    pub fn addr(&self) -> &A {
+        &self.addr
+    }
+
+    // pub async fn cancel(mut self, want_reply: bool) -> error::Result<()> {
+    //     let (sender, receiver) = oneshot::channel();
+    //     let event = Event::GlobalRequestCancelTcpIpForward {
+    //         want_reply,
+    //         addr: self.addr.clone(),
+    //         back: sender,
+    //     };
+    //     self.sender.send_next(event).await?;
+
+    //     self.cancelled = true;
+
+    //     receiver.receive_next().await?
+    // }
+}
+
+fn do_drop<'a, 'b>(value: &'a (dyn std::any::Any + 'b), session: &mpsc::Sender<Event>) {
+    if let Some(value) = value.downcast_ref::<SocketAddr>() {
         let (sender, mut receiver) = oneshot::channel();
         let event = Event::GlobalRequestCancelTcpIpForward {
             want_reply: false,
-            addr: self.addr.clone(),
+            addr: value.clone(),
             back: sender,
         };
 
-        if let Err(err) = self.sender.try_send(event) {
+        if let Err(err) = session.try_send(event) {
             match err {
                 TrySendError::Full(_) => {
                     tracing::info!("Failed to cancel");
@@ -66,28 +105,49 @@ impl Drop for Listener {
         if let Err(err) = receiver.try_recv() {
             tracing::error!("Failed to cancel: {:?}", err);
         }
+    } else if let Some(value) = value.downcast_ref::<String>() {
+        let (sender, mut receiver) = oneshot::channel();
+        let event = Event::GlobalRequestCancelStreamLocalForward {
+            want_reply: false,
+            path: value.clone(),
+            back: sender,
+        };
+
+        if let Err(err) = session.try_send(event) {
+            match err {
+                TrySendError::Full(_) => {
+                    tracing::info!("Failed to cancel");
+                }
+                TrySendError::Closed(_) => {
+                    tracing::info!("Maybe session is shutdown");
+                }
+            }
+        }
+
+        if let Err(err) = receiver.try_recv() {
+            tracing::error!("Failed to cancel: {:?}", err);
+        }
+    } else {
+        tracing::error!("Unknown value: {:?}", value);
     }
 }
 
-impl Listener {
-    pub(super) fn new(
-        receiver: mpsc::Receiver<(Stream, SocketAddr)>,
-        session: mpsc::Sender<Event>,
-        addr: SocketAddr,
-    ) -> Self {
-        Self {
-            receiver,
-            sender: session,
-            addr,
-            cancelled: false,
-        }
+impl Listener<String, ()> {
+    pub async fn cancel(mut self, want_reply: bool) -> error::Result<()> {
+        let (sender, receiver) = oneshot::channel();
+        let event = Event::GlobalRequestCancelStreamLocalForward {
+            want_reply,
+            path: self.addr.clone(),
+            back: sender,
+        };
+        self.sender.send_next(event).await?;
+
+        self.cancelled = true;
+
+        receiver.receive_next().await?
     }
 
-    pub fn addr(&self) -> &SocketAddr {
-        &self.addr
-    }
-
-    pub async fn accept(&mut self) -> error::Result<(Stream, SocketAddr)> {
+    pub async fn accept(&mut self) -> error::Result<Stream> {
         let stream = self
             .receiver
             .recv()
@@ -96,9 +156,11 @@ impl Listener {
                 detail: "Maybe session is shutdown",
             })?;
 
-        Ok(stream)
+        Ok(stream.0)
     }
+}
 
+impl Listener<SocketAddr, SocketAddr> {
     pub async fn cancel(mut self, want_reply: bool) -> error::Result<()> {
         let (sender, receiver) = oneshot::channel();
         let event = Event::GlobalRequestCancelTcpIpForward {
@@ -111,6 +173,18 @@ impl Listener {
         self.cancelled = true;
 
         receiver.receive_next().await?
+    }
+
+    pub async fn accept(&mut self) -> error::Result<(Stream, SocketAddr)> {
+        let stream = self
+            .receiver
+            .recv()
+            .await
+            .context(UnexpectedBehaviourSnafu {
+                detail: "Maybe session is shutdown",
+            })?;
+
+        Ok(stream)
     }
 }
 

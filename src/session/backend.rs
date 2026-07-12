@@ -23,15 +23,15 @@ use crate::{
     },
 };
 
-struct ListenerHandle {
-    sender: mpsc::Sender<(forward::Stream, forward::SocketAddr)>,
+struct ListenerHandle<A> {
+    sender: mpsc::Sender<(forward::Stream, A)>,
     initial_window_size: u32,
     maximum_packet_size: u32,
 }
 
-impl ListenerHandle {
+impl<A> ListenerHandle<A> {
     fn new(
-        sender: mpsc::Sender<(forward::Stream, forward::SocketAddr)>,
+        sender: mpsc::Sender<(forward::Stream, A)>,
         initial_window_size: u32,
         maximum_packet_size: u32,
     ) -> Self {
@@ -120,6 +120,45 @@ impl<T> oneshot::Sender<T> {
     }
 }
 
+#[derive(Default)]
+struct Forward {
+    tcp: HashMap<forward::SocketAddr, ListenerHandle<forward::SocketAddr>>,
+    local: HashMap<String, ListenerHandle<()>>,
+}
+
+impl Forward {
+    fn insert_tcp(
+        &mut self,
+        addr: forward::SocketAddr,
+        handle: ListenerHandle<forward::SocketAddr>,
+    ) {
+        self.tcp.insert(addr, handle);
+    }
+
+    fn insert_local(&mut self, name: String, handle: ListenerHandle<()>) {
+        self.local.insert(name, handle);
+    }
+
+    fn get_tcp(&self, addr: &forward::SocketAddr) -> Option<&ListenerHandle<forward::SocketAddr>> {
+        self.tcp.get(addr)
+    }
+
+    fn get_local(&self, name: &str) -> Option<&ListenerHandle<()>> {
+        self.local.get(name)
+    }
+
+    fn remove_tcp(
+        &mut self,
+        addr: &forward::SocketAddr,
+    ) -> Option<ListenerHandle<forward::SocketAddr>> {
+        self.tcp.remove(addr)
+    }
+
+    fn remove_local(&mut self, name: &str) -> Option<ListenerHandle<()>> {
+        self.local.remove(name)
+    }
+}
+
 pub struct SessionInner<T, N>
 where
     T: AsyncRead + AsyncWrite + Unpin + Send,
@@ -136,7 +175,7 @@ where
     channels: Vec<ChannelHandle>,
     server_algorithms: Vec<String>,
     server_ping_supported: bool,
-    forward: HashMap<forward::SocketAddr, ListenerHandle>,
+    forward: Forward,
     renegotiating: bool,
 }
 
@@ -417,7 +456,7 @@ where
                 originator_address,
                 originator_port,
             } => {
-                self.handle_forwarded_tcp_ip(
+                self.handle_channel_open_forwarded_tcp_ip(
                     sender_channel,
                     initial_window_size,
                     maximum_packet_size,
@@ -456,6 +495,22 @@ where
                     maximum_packet_size,
                     originator_address,
                     originator_port,
+                )
+                .await?;
+            }
+            Message::ChannelOpenForwardedStreamLocal {
+                sender_channel,
+                initial_window_size,
+                maximum_packet_size,
+                path,
+                reserved,
+            } => {
+                self.handle_channel_open_forwarded_stream_local(
+                    sender_channel,
+                    initial_window_size,
+                    maximum_packet_size,
+                    path,
+                    reserved,
                 )
                 .await?;
             }
@@ -854,7 +909,55 @@ where
     //     }
     // }
 
-    pub async fn channel_clean(&mut self) -> error::Result<()> {
+    async fn clean(
+        &mut self,
+        channel: bool,
+        forward_tcp: bool,
+        forward_local: bool,
+    ) -> error::Result<()> {
+        if channel {
+            self.channel_clean().await?;
+        }
+
+        if forward_tcp {
+            self.forward_tcp_clean().await?;
+        }
+
+        if forward_local {
+            self.forward_local_clean().await?;
+        }
+
+        Ok(())
+    }
+
+    async fn forward_local_clean(&mut self) -> error::Result<()> {
+        let mut to_be_cleaned = vec![];
+        for (k, v) in self.forward.local.iter() {
+            if v.sender.is_closed() {
+                to_be_cleaned.push(k.to_string());
+            }
+        }
+        for i in to_be_cleaned {
+            self.global_request_cancel_stream_local_forward(true, &i)
+                .await?;
+        }
+        Ok(())
+    }
+
+    async fn forward_tcp_clean(&mut self) -> error::Result<()> {
+        let mut to_be_cleaned = vec![];
+        for (k, v) in self.forward.tcp.iter() {
+            if v.sender.is_closed() {
+                to_be_cleaned.push(k.clone());
+            }
+        }
+        for i in to_be_cleaned {
+            self.global_request_cancel_tcp_ip_forward(true, &i).await?;
+        }
+        Ok(())
+    }
+
+    async fn channel_clean(&mut self) -> error::Result<()> {
         let len = self.channels.len();
         for i in (0..len).rev() {
             let channel = &mut self.channels[i];
@@ -925,12 +1028,86 @@ where
         Ok(sender)
     }
 
+    async fn global_request_cancel_stream_local_forward(
+        &mut self,
+        want_reply: bool,
+        path: &str,
+    ) -> error::Result<()> {
+        let buffer = make_buffer_without_header! {
+            u8: SSH_MSG_GLOBAL_REQUEST,
+            one: openssh::CANCEL_STREAM_LOCAL_FORWARD,
+            u8: want_reply.into(),
+            one: path
+        };
+
+        self.socket.send_payload(&buffer[..]).await?;
+
+        if want_reply {
+            self.match_this_msg(|this, msg| {
+                Some(match msg {
+                    Message::RequestSuccess => {
+                        if this.forward.remove_local(path).is_none() {
+                            tracing::warn!("Maybe forward listener not exists")
+                        }
+                        Ok(())
+                    }
+                    Message::RequestFailure => Err(RequestFailureSnafu.build().into()),
+                    _ => return None,
+                })
+            })
+            .await?;
+        } else {
+            if self.forward.remove_local(path).is_none() {
+                tracing::warn!("Maybe forward listener not exists")
+            }
+        }
+        Ok(())
+    }
+
+    async fn global_request_stream_local_forward(
+        &mut self,
+        path: &str,
+        initial_window_size: u32,
+        maximum_packet_size: u32,
+    ) -> error::Result<forward::Listener<String, ()>> {
+        let buffer = make_buffer_without_header! {
+            u8: SSH_MSG_GLOBAL_REQUEST,
+            one: SSH_GLOBAL_REQUEST_TYPE_TCP_IP_FORWARD,
+            u8: 1,
+            one: path,
+        };
+
+        self.socket.send_payload(&buffer[..]).await?;
+
+        self.match_this_msg(|this, msg| match msg {
+            Message::RequestSuccess => {
+                let frontend = match this.upgrade_frontend() {
+                    Ok(v) => v,
+                    Err(e) => return Some(Err(e)),
+                };
+
+                let (sender, receiver) = mpsc::channel(DEFAULT_CHANNEL_CAPACITY);
+
+                let listener = forward::Listener::new(receiver, frontend, path.to_string());
+
+                this.forward.insert_local(
+                    path.to_string(),
+                    ListenerHandle::new(sender, initial_window_size, maximum_packet_size),
+                );
+                Some(Ok(listener))
+            }
+            Message::RequestFailure => Some(Err(RequestFailureSnafu.build().into())),
+            _ => None,
+        })
+        .await
+    }
+
     async fn global_request_tcp_ip_forward(
         &mut self,
         mut addr: forward::SocketAddr,
         initial_window_size: u32,
         maximum_packet_size: u32,
-    ) -> error::Result<forward::Listener> {
+    ) -> error::Result<forward::Listener<forward::SocketAddr, forward::SocketAddr>> {
         let buffer = make_buffer_without_header! {
             u8: SSH_MSG_GLOBAL_REQUEST,
             one: SSH_GLOBAL_REQUEST_TYPE_TCP_IP_FORWARD,
@@ -956,7 +1133,7 @@ where
 
                 let listener = forward::Listener::new(receiver, frontend, addr.clone());
 
-                self.forward.insert(
+                self.forward.insert_tcp(
                     addr,
                     ListenerHandle::new(sender, initial_window_size, maximum_packet_size),
                 );
@@ -1535,8 +1712,13 @@ where
                     .await;
                 back.send_tracing(result);
             }
-            Event::ChannelClean { back } => {
-                let result = self.channel_clean().await;
+            Event::Clean {
+                back,
+                channel,
+                forward_tcp,
+                forward_local,
+            } => {
+                let result = self.clean(channel, forward_tcp, forward_local).await;
                 back.send_tracing(result);
             }
             Event::ChannelRequestSignal {
@@ -1578,11 +1760,51 @@ where
                 let result = self.send_ignore_message(&data).await;
                 back.send_tracing(result);
             }
+            Event::ChannelOpenDirectStreamLocal {
+                initial_window_size,
+                maximum_packet_size,
+                path,
+                back,
+            } => {
+                let result = self
+                    .channel_open_direct_stream_local(
+                        initial_window_size,
+                        maximum_packet_size,
+                        &path,
+                    )
+                    .await;
+                back.send_tracing(result);
+            }
+            Event::GlobalRequestCancelStreamLocalForward {
+                want_reply,
+                path,
+                back,
+            } => {
+                let result = self
+                    .global_request_cancel_stream_local_forward(want_reply, &path)
+                    .await;
+                back.send_tracing(result);
+            }
+            Event::GlobalRequestStreamLocalForward {
+                path,
+                initial_window_size,
+                maximum_packet_size,
+                back,
+            } => {
+                let result = self
+                    .global_request_stream_local_forward(
+                        &path,
+                        initial_window_size,
+                        maximum_packet_size,
+                    )
+                    .await;
+                back.send_tracing(result);
+            }
         }
         Ok(())
     }
 
-    async fn handle_forwarded_tcp_ip(
+    async fn handle_channel_open_forwarded_tcp_ip(
         &mut self,
         sender_channel: u32,
         initial_window_size: u32,
@@ -1599,7 +1821,7 @@ where
             let originator_port = u16::try_from(originator_port)
                 .ok()
                 .context(super::InvalidPortSnafu)?;
-            let Some(listener) = self.forward.get(&forward::SocketAddr::new(
+            let Some(listener) = self.forward.get_tcp(&forward::SocketAddr::new(
                 connected_address.to_string(),
                 connected_port,
             )) else {
@@ -1686,6 +1908,99 @@ where
         Ok(())
     }
 
+    async fn handle_channel_open_forwarded_stream_local(
+        &mut self,
+        sender_channel: u32,
+        initial_window_size: u32,
+        maximum_packet_size: u32,
+        path: &str,
+        reserved: &str,
+    ) -> error::Result<()> {
+        if !reserved.is_empty() {
+            tracing::info!("reserved is not empty: {}", reserved);
+        }
+        let verify = || {
+            let Some(listener) = self.forward.get_local(path) else {
+                return Err(super::UnexpectedMessageSnafu {
+                    detail: "No such forward listener",
+                }
+                .build()
+                .into());
+            };
+
+            error::ok(listener)
+        };
+
+        let listener = match verify() {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::info!("Invalid forward message from server");
+
+                let buffer = make_buffer_without_header! {
+                    u8: SSH_MSG_CHANNEL_OPEN_FAILURE,
+                    u32: sender_channel,
+                    u32: msg::ChannelOpenFailureReason::CONNECT_FAILED.0,
+                    one: e.to_string(),
+                    one: "" // language
+                };
+
+                self.socket.send_payload(&buffer[..]).await?;
+
+                return Ok(());
+            }
+        };
+
+        let id = IdentityPair::new(self.next_channel_id(), sender_channel);
+
+        let buffer = make_buffer_without_header! {
+            u8: SSH_MSG_CHANNEL_OPEN_CONFIRMATION,
+            u32: id.server,
+            u32: id.client,
+            u32: listener.initial_window_size,
+            u32: listener.maximum_packet_size,
+        };
+
+        self.socket.send_payload(&buffer[..]).await?;
+
+        let (sender, receiver) = mpsc::channel(DEFAULT_CHANNEL_CAPACITY);
+
+        let handle = ChannelHandle {
+            client: ChannelEndpoint {
+                id: id.client,
+                initial_window_size: listener.initial_window_size,
+                used_window_size: 0,
+                maximum_packet_size: listener.maximum_packet_size,
+                closed: false,
+                eof: false,
+            },
+            server: ChannelEndpoint {
+                id: id.server,
+                initial_window_size,
+                used_window_size: 0,
+                maximum_packet_size,
+                closed: false,
+                eof: false,
+            },
+            sender,
+        };
+
+        self.channels.push(handle);
+
+        let channel = channel::Channel::new(id, receiver, self.upgrade_frontend()?);
+
+        if listener
+            .sender
+            .send((forward::Stream::new(channel), ()))
+            .await
+            .is_err()
+        {
+            tracing::warn!("Failed to send forward stream, closing channel");
+            self.channel_close(id).await?;
+        }
+
+        Ok(())
+    }
+
     async fn global_request_cancel_tcp_ip_forward(
         &mut self,
         want_reply: bool,
@@ -1705,7 +2020,7 @@ where
             self.match_this_msg(|this, msg| {
                 Some(match msg {
                     Message::RequestSuccess => {
-                        if this.forward.remove(addr).is_none() {
+                        if this.forward.remove_tcp(addr).is_none() {
                             tracing::warn!("Maybe forward listener not exists")
                         }
                         Ok(())
@@ -1716,7 +2031,7 @@ where
             })
             .await?;
         } else {
-            if self.forward.remove(addr).is_none() {
+            if self.forward.remove_tcp(addr).is_none() {
                 tracing::warn!("Maybe forward listener not exists")
             }
         }
@@ -2159,6 +2474,37 @@ where
         // } else {
         //     Ok(())
         // }
+    }
+
+    async fn channel_open_direct_stream_local(
+        &mut self,
+        initial_window_size: u32,
+        maximum_packet_size: u32,
+        path: &str,
+    ) -> error::Result<channel::Channel> {
+        let client_id = self.next_channel_id();
+        let buffer = make_buffer_without_header! {
+            u8: SSH_MSG_CHANNEL_OPEN,
+            one: openssh::DIRECT_STREM_LOCAL,
+            u32: client_id,
+            u32: initial_window_size,
+            u32: maximum_packet_size,
+            one: path,
+            one: "",
+            u32: 0
+        };
+
+        self.socket.send_payload(&buffer[..]).await?;
+
+        let client = ChannelEndpoint {
+            id: client_id,
+            initial_window_size,
+            used_window_size: 0,
+            maximum_packet_size,
+            closed: false,
+            eof: false,
+        };
+        self.wait_for_opening_channel(client).await
     }
 
     async fn channel_open_direct_tcp_ip(

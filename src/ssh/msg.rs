@@ -211,6 +211,13 @@ pub(crate) enum Message<'a> {
         originator_address: &'a str,
         originator_port: u32,
     },
+    ChannelOpenForwardedStreamLocal {
+        sender_channel: u32,
+        initial_window_size: u32,
+        maximum_packet_size: u32,
+        path: &'a str,
+        reserved: &'a str,
+    },
     ChannelOpenUnknown {},
     ChannelUnknownRequest {
         recipient_channel: u32,
@@ -503,6 +510,22 @@ impl<'a> Message<'a> {
                             maximum_packet_size,
                             originator_address,
                             originator_port,
+                        })
+                    }
+                    openssh::SSH_CHANNEL_TYPE_FORWARDED_STREAM_LOCAL => {
+                        let sender_channel = consumer.consume_u32()?;
+                        let initial_window_size = consumer.consume_u32()?;
+                        let maximum_packet_size = consumer.consume_u32()?;
+                        let path = std::str::from_utf8(consumer.consume_one()?)
+                            .context(ExpectStringSnafu)?;
+                        let reserved = std::str::from_utf8(consumer.consume_one()?)
+                            .context(ExpectStringSnafu)?;
+                        Ok(Self::ChannelOpenForwardedStreamLocal {
+                            sender_channel,
+                            initial_window_size,
+                            maximum_packet_size,
+                            path,
+                            reserved,
                         })
                     }
                     _ => Ok(Self::ChannelOpenUnknown {}),

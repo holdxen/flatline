@@ -113,6 +113,13 @@ pub(super) enum Event {
         maximum_packet_size: u32,
         back: oneshot::Sender<error::Result<Channel>>,
     },
+    ChannelOpenDirectStreamLocal {
+        initial_window_size: u32,
+        maximum_packet_size: u32,
+        path: String,
+        back: oneshot::Sender<error::Result<Channel>>,
+    },
+
     ChannelRequestX11 {
         channel_id: IdentityPair,
         want_reply: bool,
@@ -135,18 +142,34 @@ pub(super) enum Event {
         channel_id: IdentityPair,
         back: oneshot::Sender<error::Result<()>>,
     },
-    ChannelClean {
+    Clean {
+        channel: bool,
+        forward_tcp: bool,
+        forward_local: bool,
         back: oneshot::Sender<error::Result<()>>,
     },
     GlobalRequestTcpIPForward {
         addr: forward::SocketAddr,
         initial_window_size: u32,
         maximum_packet_size: u32,
-        back: oneshot::Sender<error::Result<forward::Listener>>,
+        back: oneshot::Sender<
+            error::Result<forward::Listener<forward::SocketAddr, forward::SocketAddr>>,
+        >,
     },
     GlobalRequestCancelTcpIpForward {
         want_reply: bool,
         addr: forward::SocketAddr,
+        back: oneshot::Sender<error::Result<()>>,
+    },
+    GlobalRequestStreamLocalForward {
+        path: String,
+        initial_window_size: u32,
+        maximum_packet_size: u32,
+        back: oneshot::Sender<error::Result<forward::Listener<String, ()>>>,
+    },
+    GlobalRequestCancelStreamLocalForward {
+        want_reply: bool,
+        path: String,
         back: oneshot::Sender<error::Result<()>>,
     },
     Renegotiate {

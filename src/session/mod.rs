@@ -445,12 +445,31 @@ impl Session {
         Ok(session)
     }
 
+    pub async fn listen_on_server_local(
+        &self,
+        path: impl Into<String>,
+        initial_window_size: u32,
+        maximum_packet_size: u32,
+    ) -> error::Result<forward::Listener<String, ()>> {
+        let (sender, receiver) = oneshot::channel();
+        let event = Event::GlobalRequestStreamLocalForward {
+            path: path.into(),
+            initial_window_size,
+            maximum_packet_size,
+            back: sender,
+        };
+
+        self.sender.send_next(event).await?;
+
+        receiver.receive_next().await?
+    }
+
     pub async fn listen_on_server(
         &self,
         addr: forward::SocketAddr,
         initial_window_size: u32,
         maximum_packet_size: u32,
-    ) -> error::Result<forward::Listener> {
+    ) -> error::Result<forward::Listener<forward::SocketAddr, forward::SocketAddr>> {
         let (sender, receiver) = oneshot::channel();
         let event = Event::GlobalRequestTcpIPForward {
             addr,
@@ -462,6 +481,27 @@ impl Session {
         self.sender.send_next(event).await?;
 
         receiver.receive_next().await?
+    }
+
+    pub async fn connect_to_server_local(
+        &self,
+        path: impl Into<String>,
+        initial_window_size: u32,
+        maximum_packet_size: u32,
+    ) -> error::Result<forward::Stream> {
+        let (sender, receiver) = oneshot::channel();
+        let event = Event::ChannelOpenDirectStreamLocal {
+            initial_window_size,
+            maximum_packet_size,
+            path: path.into(),
+            back: sender,
+        };
+
+        self.sender.send_next(event).await?;
+
+        let channel = receiver.receive_next().await??;
+
+        Ok(forward::Stream::new(channel))
     }
 
     pub async fn connect_to_server(
@@ -543,10 +583,20 @@ impl Session {
         sftp::Handle::handshake(channel).await
     }
 
-    pub async fn channel_clean(&self) -> error::Result<()> {
+    pub async fn clean(
+        &self,
+        channel: bool,
+        forward_tcp: bool,
+        forward_local: bool,
+    ) -> error::Result<()> {
         let (sender, receiver) = oneshot::channel();
 
-        let event = Event::ChannelClean { back: sender };
+        let event = Event::Clean {
+            back: sender,
+            channel,
+            forward_tcp,
+            forward_local,
+        };
 
         self.sender.send_next(event).await?;
 

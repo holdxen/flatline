@@ -211,6 +211,11 @@ pub mod openssh {
     pub const SSH_GLOBAL_REQUEST_TYPE_HOST_KEYS: &str = "hostkeys-00@openssh.com";
 
     pub const SSH_CHANNEL_TYPE_AGENT_CONNECT: &str = "auth-agent@openssh.com";
+    pub const SSH_CHANNEL_TYPE_FORWARDED_STREAM_LOCAL: &str = "forwarded-streamlocal@openssh.com";
+
+    pub const DIRECT_STREM_LOCAL: &str = "direct-streamlocal@openssh.com";
+    pub const STREAM_LOCAL_FORWARD: &str = "streamlocal-forward@openssh.com";
+    pub const CANCEL_STREAM_LOCAL_FORWARD: &str = "cancel-streamlocal-forward@openssh.com";
 
     // OpenSSH 扩展消息
     pub const SSH_MSG_PING: u8 = 192;
