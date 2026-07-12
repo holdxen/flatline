@@ -1574,6 +1574,10 @@ where
                 let result = self.disconnect(reason, &description).await;
                 back.send_tracing(result);
             }
+            Event::SendIgnoreMessage { data, back } => {
+                let result = self.send_ignore_message(&data).await;
+                back.send_tracing(result);
+            }
         }
         Ok(())
     }
@@ -2691,6 +2695,17 @@ where
             })
         })
         .await
+    }
+
+    pub async fn send_ignore_message(&mut self, data: &[u8]) -> error::Result<()> {
+        let buf = make_buffer_without_header! {
+            u8: SSH_MSG_IGNORE,
+            one: data,
+        };
+
+        self.socket.send_payload(&buf[..]).await?;
+
+        Ok(())
     }
 
     pub async fn send_debug_message(

@@ -38,6 +38,10 @@ pub(super) enum Event {
         message: String,
         back: oneshot::Sender<error::Result<()>>,
     },
+    SendIgnoreMessage {
+        data: Vec<u8>,
+        back: oneshot::Sender<error::Result<()>>,
+    },
     ChannelRequestPty {
         channel_id: IdentityPair,
         terminal: String,

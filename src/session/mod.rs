@@ -207,6 +207,21 @@ impl Session {
         Ok(())
     }
 
+    pub async fn send_ignore_message(&self, data: impl Into<Vec<u8>>) -> error::Result<()> {
+        let (sender, receiver) = oneshot::channel();
+
+        let event = Event::SendIgnoreMessage {
+            data: data.into(),
+            back: sender,
+        };
+
+        self.sender.send_next(event).await?;
+
+        receiver.receive_next().await??;
+
+        Ok(())
+    }
+
     pub async fn send_debug_message(
         &self,
         always_display: bool,
