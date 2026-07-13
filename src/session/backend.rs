@@ -479,7 +479,13 @@ where
                 )
                 .await?;
             }
-            Message::ChannelOpenUnknown { .. } => {}
+            Message::ChannelOpenUnknown {
+                sender_channel,
+                r#type,
+            } => {
+                self.handle_channel_open_unknown(r#type, sender_channel)
+                    .await?;
+            }
             Message::RequestSuccess => {}
             Message::RequestFailure => {}
             Message::ChannelOpenX11 {
@@ -518,6 +524,24 @@ where
         if !handled {
             self.send_unimplemented().await?;
         }
+        Ok(())
+    }
+
+    async fn handle_channel_open_unknown(
+        &mut self,
+        r#type: &str,
+        sender_channel: u32,
+    ) -> error::Result<()> {
+        tracing::warn!("Unrecognized channel type: {}", r#type);
+        let buffer = make_buffer_without_header! {
+            u8: SSH_MSG_CHANNEL_OPEN_FAILURE,
+            u32: sender_channel,
+            u32: msg::ChannelOpenFailureReason::UNKNOWN_CHANNEL_TYPE.0,
+            one: format!("Unrecognized channel type: {}", r#type),
+            one: "" // language
+        };
+
+        self.socket.send_payload(&buffer[..]).await?;
         Ok(())
     }
 

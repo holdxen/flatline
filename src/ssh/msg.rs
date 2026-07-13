@@ -218,7 +218,10 @@ pub(crate) enum Message<'a> {
         path: &'a str,
         reserved: &'a str,
     },
-    ChannelOpenUnknown {},
+    ChannelOpenUnknown {
+        sender_channel: u32,
+        r#type: &'a str,
+    },
     ChannelUnknownRequest {
         recipient_channel: u32,
         r#type: &'a str,
@@ -528,7 +531,13 @@ impl<'a> Message<'a> {
                             reserved,
                         })
                     }
-                    _ => Ok(Self::ChannelOpenUnknown {}),
+                    _ => {
+                        let sender_channel = consumer.consume_u32()?;
+                        Ok(Self::ChannelOpenUnknown {
+                            sender_channel,
+                            r#type,
+                        })
+                    }
                 }
             }
             openssh::SSH_MSG_PING => {
