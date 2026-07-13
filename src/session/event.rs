@@ -1,3 +1,12 @@
+//! Internal command events exchanged between the public API and the session
+//! backend task.
+//!
+//! `Event` is `pub(super)` and never exposed to library users: every
+//! `Session` method constructs the event matching its operation, sends it
+//! through the session's channel to the backend task, and awaits the reply
+//! carried in each variant's `back` oneshot sender. This module is the single
+//! point where the user-facing API is translated into backend work.
+
 use tokio::sync::oneshot;
 
 use crate::session::{InteractiveMethod, KeyboardInteractive, forward};

@@ -1,3 +1,10 @@
+//! Message authentication for SSH binary packets (RFC 4253, section 6.4).
+//!
+//! A [`Mac`] instance authenticates one direction of a connection. Besides
+//! the plain MACs of RFC 4253, the OpenSSH `*-etm@openssh.com`
+//! (encrypt-then-MAC) variants are supported, in which the tag is computed
+//! over the encrypted packet instead of the plaintext.
+
 use openssl::{
     md::{Md, MdRef},
     md_ctx::MdCtx,
@@ -11,6 +18,7 @@ use crate::error::builder;
 use indexmap::IndexMap;
 
 algo_list!(
+    "message authentication code",
     all,
     new_all,
     new_mac_by_name,
@@ -127,16 +135,59 @@ algo_list!(
     // ),
 );
 
+/// Computes the message authentication code that protects outgoing SSH binary
+/// packets, or verifies the tag of incoming ones (RFC 4253, section 6.4).
+///
+/// One instance serves one direction of a connection. `update` is called with
+/// the packet sequence number first and then with the packet bytes, and
+/// `finalize` produces (or, on the receive side, is compared against) the
+/// tag for that packet.
 pub trait Mac {
+    /// Returns the SSH MAC algorithm name (`hmac-sha2-256`,
+    /// `umac-128-etm@openssh.com`, ...) as it appears in `SSH_MSG_KEXINIT`.
     fn name(&self) -> &str;
+    /// Returns whether this is an encrypt-then-MAC algorithm (any name ending
+    /// in `-etm@openssh.com`).
+    ///
+    /// In encrypt-then-MAC mode the tag is computed over the encrypted packet
+    /// (with the 4-byte length header left in the clear), as an OpenSSH
+    /// extension; otherwise the packet is authenticated first and then
+    /// encrypted, as specified in RFC 4253.
     fn encrypt_then_mac(&self) -> bool;
+    /// Returns the MAC key length in bytes, which determines how many key
+    /// bytes are derived for this direction during key exchange.
     fn key_len(&self) -> usize;
+    /// Returns the length in bytes of the tag produced by `finalize`.
+    ///
+    /// Some algorithms truncate their tag, for example `hmac-sha1-96` emits
+    /// only 12 bytes.
     fn mac_len(&self) -> usize;
+    /// Sets the MAC key; must be called before `update`.
     fn initialize(&mut self, key: &[u8]) -> Result<()>;
+    /// Feeds data into the tag computation.
+    ///
+    /// The first call for a packet carries the 4-byte packet sequence number
+    /// (big-endian) and later calls carry the packet bytes. UMAC
+    /// implementations consume those leading bytes as the packet nonce and
+    /// exclude them from the message, while HMAC algorithms cover the
+    /// sequence number and packet together, as required by RFC 4253.
     fn update(&mut self, data: &[u8]) -> Result<()>;
+    /// Completes the tag for the data fed since the last call, returns it,
+    /// and resets the state so the next packet can be processed.
+    ///
+    /// The result is [`mac_len`](Mac::mac_len) bytes long. Fails if
+    /// `initialize` has not been called or the packet's sequence number was
+    /// never supplied.
     fn finalize(&mut self) -> Result<Vec<u8>>;
 }
 
+/// The UMAC message authentication code (UMAC-64 and UMAC-128) used by
+/// OpenSSH's `umac-64@openssh.com`, `umac-128@openssh.com` and their `-etm`
+/// variants.
+///
+/// Only available with the `umac` cargo feature. `KEY` and `TAG` are the key
+/// and tag sizes in bytes and `T` is the underlying `umac` crate
+/// implementation.
 #[cfg(feature = "umac")]
 pub struct UMac<const KEY: usize, const TAG: usize, T: umac::UMac<KEY, TAG>> {
     algorithm: Option<T>,

@@ -1,3 +1,17 @@
+//! SSH transport handshake: version exchange, algorithm negotiation and key
+//! exchange.
+//!
+//! [`Handshaker`] drives the initial handshake on a fresh socket in three
+//! steps — [`banner_version_exchange`](Handshaker::banner_version_exchange),
+//! [`negotiate_methods`](Handshaker::negotiate_methods) and
+//! [`key_exchange`](Handshaker::key_exchange) — after which the connection is
+//! encrypted and the session backend takes over. [`RekeyExchange`] repeats
+//! the same procedure on a live session (rekeying).
+//!
+//! [`Config`] holds the client's algorithm preferences and negotiation
+//! switches; [`Error`] (re-exported as
+//! [`HandshakeError`](super::HandshakeError)) reports handshake failures.
+
 use std::fmt;
 use std::str::{Utf8Error, from_utf8};
 
@@ -27,66 +41,148 @@ use crate::{
     stream::BufferStream,
 };
 
+/// Failures raised while establishing the transport layer.
+///
+/// Re-exported from the session module as
+/// [`HandshakeError`](super::HandshakeError).
 #[derive(Debug, snafu::Snafu)]
 pub enum Error {
+    /// The server's identification banner exceeded the protocol's 255-byte
+    /// limit.
     #[snafu(display("Banner too long"))]
     BannerTooLong,
+    /// The server announced an SSH version other than `2.0` or `1.99`.
     #[snafu(display("Unsupported SSH version: {}", version))]
-    UnsupportedVersion { version: String },
+    UnsupportedVersion {
+        /// The identification string the server sent.
+        version: String,
+    },
+    /// The server's identification line was not valid UTF-8.
     #[snafu(display("Invalid banner: {}", source))]
-    InvalidBanner { source: Utf8Error },
+    InvalidBanner {
+        /// The UTF-8 decoding error.
+        source: Utf8Error,
+    },
+    /// A name-list in the `SSH_MSG_KEXINIT` payload was not valid UTF-8.
     #[snafu(display("Invalid string: {}", source))]
-    InvalidString { source: Utf8Error },
+    InvalidString {
+        /// The UTF-8 decoding error.
+        source: Utf8Error,
+    },
+    /// No algorithm offered by the client matched what the server offered.
     #[snafu(display("Negotiation failed"))]
     NegotiationFailed,
+    /// The server's host-key signature did not verify against the exchange
+    /// hash.
     #[snafu(display("Signature verification failed"))]
     SignatureVerificationFailed,
+    /// The [`Notifier`](crate::session::Notifier) rejected the server's host
+    /// key.
     #[snafu(display("Server host key rejected by user"))]
     ServerHostKeyRejectedByUser,
+    /// A message arrived while both peers had enabled strict key exchange
+    /// (`kex-strict-c-v00@openssh.com`), where only the expected message is
+    /// permitted.
     #[snafu(display("Unexpected message in strict mode: code {}", code))]
-    UnexpectedMessageInStrictMode { code: u8 },
+    UnexpectedMessageInStrictMode {
+        /// The message code that arrived out of turn.
+        code: u8,
+    },
+    /// The server sent `SSH_MSG_DISCONNECT` during the handshake.
     #[snafu(display("Unexpected disconnect message: {:?} - {}", reason, description))]
     UnexpectedDisconnectMessage {
+        /// The disconnect reason code.
         reason: DisconnectReason,
+        /// The human-readable description sent by the server.
         description: String,
     },
+    /// A banner line that should have carried the `SSH-` identification did
+    /// not, or did not match the expected format.
     #[snafu(display("Unexpected server banner: {}", banner))]
-    UnexpectedServerBanner { banner: String },
+    UnexpectedServerBanner {
+        /// The offending line.
+        banner: String,
+    },
 }
 
+/// Drives the initial SSH handshake on a newly connected socket.
+///
+/// Created by the session's connect/listen helpers; call its three methods in
+/// order to bring the link up. On success the negotiated keys are installed
+/// in [`cipher_stream`](Self::cipher_stream) and the session backend spawns.
 pub struct Handshaker<T, N>
 where
     T: AsyncRead + AsyncWrite + Unpin + Send,
     N: Notifier + Send + 'static,
 {
+    /// The identification string sent to the server (`SSH-2.0-<name>_<ver>`).
     pub client_version: String,
+    /// Optional pre-`SSH-` banner lines sent before the identification
+    /// string.
     pub banner: Vec<String>,
+    /// Algorithm preferences and negotiation switches.
     pub config: Config,
+    /// Callbacks used for host-key verification and forwarding requests.
     pub notifier: N,
+    /// The socket before the protocol streams are built (consumed by
+    /// [`banner_version_exchange`](Self::banner_version_exchange)).
     pub socket: Option<BufferStream<T>>,
+    /// The connection after the banner exchange, still unencrypted.
     pub plain_stream: Option<PlainStream<T>>,
+    /// The connection after `SSH_MSG_NEWKEYS`, encrypted and compressed.
     pub cipher_stream: Option<CipherStream<T>>,
+    /// The server's identification string, once received.
     pub server_version: Option<String>,
+    /// The server's pre-identification banner lines.
     pub server_banner: Option<Vec<String>>,
+    /// The server's `SSH_MSG_KEXINIT` payload, once received.
     pub server_kex_msg: Option<Vec<u8>>,
+    /// Our own `SSH_MSG_KEXINIT` payload, once sent.
     pub client_kex_msg: Option<Vec<u8>>,
+    /// The algorithms selected by negotiation, once agreed.
     pub matched_methods: Option<MatchedMethods>,
+    /// Quirks detected from the server's identification string.
     pub compat_options: CompatOptions,
+    /// The exchange hash / session identifier, set once the key exchange
+    /// completes.
     pub session_id: Option<Vec<u8>>,
 }
 
+/// The client's algorithm preferences and negotiation switches.
+///
+/// Every `*_client_to_server` / `*_server_to_client` map is an ordered list
+/// of algorithm names to factories: the keys are advertised in
+/// `SSH_MSG_KEXINIT` in insertion order, and the first entry also offered by
+/// the server wins. [`Default::default`] registers every algorithm this
+/// crate implements.
 pub struct Config {
+    /// Key-exchange algorithms, in preference order.
     pub kex: IndexMap<String, Factory<dyn KeyExchange + Send>>,
+    /// Host-key (signature verification) algorithms, in preference order.
     pub host_key: IndexMap<String, Factory<dyn Verify + Send>>,
+    /// Ciphers for the client → server direction.
     pub crypt_client_to_server: IndexMap<String, Factory<dyn Encrypt + Send>>,
+    /// Ciphers for the server → client direction.
     pub crypt_server_to_client: IndexMap<String, Factory<dyn Decrypt + Send>>,
+    /// Message authentication codes for the client → server direction.
     pub mac_client_to_server: IndexMap<String, Factory<dyn Mac + Send>>,
+    /// Message authentication codes for the server → client direction.
     pub mac_server_to_client: IndexMap<String, Factory<dyn Mac + Send>>,
+    /// Compression algorithms (encoders) for the client → server direction.
     pub compress_client_to_server: IndexMap<String, Factory<dyn Encode + Send>>,
+    /// Compression algorithms (decoders) for the server → client direction.
     pub compress_server_to_client: IndexMap<String, Factory<dyn Decode + Send>>,
+    /// Signature algorithms used to sign the exchange hash when the client
+    /// authenticates with public keys (e.g. certificates).
     pub signer: IndexMap<String, Factory<dyn Signature + Send>>,
+    /// Advertise strict key exchange (`kex-strict-c-v00@openssh.com`), which
+    /// hardens the handshake against downgrade attacks.
     pub key_strict: bool,
+    /// Advertise support for `ext-info-c`, allowing the server to send
+    /// `SSH_MSG_EXT_INFO` after the key exchange.
     pub ext: bool,
+    /// Disable the compatibility workarounds applied for known server
+    /// quirks.
     pub disable_compat: bool,
 }
 
@@ -138,6 +234,8 @@ impl fmt::Debug for Config {
     }
 }
 
+/// The concrete algorithm instances chosen by negotiation, ready to be
+/// initialized with the derived keys.
 #[derive(derive_more::Debug)]
 pub struct MatchedMethods {
     #[debug("{}", kex.name())]
@@ -354,12 +452,20 @@ impl Default for Config {
     }
 }
 
+/// Server quirks detected from the peer's identification string.
 #[derive(Default, Clone, Copy, Debug)]
 pub(super) struct CompatOptions {
+    /// Sun_SSSH 1.0: the server does not support rekeying.
     pub unsupported_rekey: bool,
+    /// OpenSSH 6.5/6.6: pad `curve25519-sha256@libssh.org` like the buggy
+    /// implementations expect (and drop the algorithm instead).
     pub curve25519_pad: bool,
+    /// OpenSSH 7.4: the server needs the sign algorithm to be specified
+    /// explicitly.
     pub specify_server_sign_algorithm: bool,
+    /// SecureCRT/SecureFX: the server uses the legacy session-ID derivation.
     pub old_session_id: bool,
+    /// Cisco: the server caps DH group sizes at 4096 bits.
     pub limited_dh_ex: bool,
 }
 
@@ -397,6 +503,8 @@ where
     T: AsyncRead + AsyncWrite + Unpin + Send,
     N: Notifier + Send + 'static,
 {
+    /// Creates a handshaker for `socket`, using `config`'s preferences and
+    /// reporting events to `notifier`.
     pub fn new(socket: T, notifier: N, config: Config) -> Self {
         let client_version = format!(
             "SSH-2.0-{}_{}",
@@ -420,6 +528,19 @@ where
             session_id: None,
         }
     }
+    /// Performs the identification-string exchange.
+    ///
+    /// Sends the optional banner lines and our `SSH-2.0-...` version, then
+    /// reads the server's banner lines until its identification string
+    /// arrives. The server's version and quirks are recorded and the socket
+    /// is wrapped in a [`PlainStream`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::BannerTooLong`] if the server's banner exceeds the
+    /// 255-byte protocol limit, [`Error::UnsupportedVersion`] for a version
+    /// other than `2.0`/`1.99`, and [`Error::UnexpectedServerBanner`] if a
+    /// line starting with `SSH-` does not parse as an identification string.
     pub async fn banner_version_exchange(&mut self) -> error::Result<()> {
         use regex::Regex;
         let re = Regex::new(
@@ -526,6 +647,16 @@ where
         }
     }
 
+    /// Sends our `SSH_MSG_KEXINIT` and selects algorithms from the server's.
+    ///
+    /// Ignores unrelated messages until the server's `SSH_MSG_KEXINIT`
+    /// arrives, then picks the first client-preferred algorithm in each
+    /// category that the server also offers.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::NegotiationFailed`] when no algorithm is common to
+    /// both peers.
     pub async fn negotiate_methods(&mut self) -> error::Result<()> {
         let mut client_methods = Methods::from_config(&self.config);
         client_methods.do_compat(!self.config.disable_compat && self.compat_options.curve25519_pad);
@@ -570,9 +701,23 @@ where
         Ok(())
     }
 
+    /// Runs the key exchange and switches the connection to encrypted mode.
+    ///
+    /// Performs the group exchange if the negotiated KEX needs one, sends the
+    /// client's exchange value, verifies the server's host-key signature
+    /// against the exchange hash, asks the notifier to accept the host key,
+    /// derives the cipher/MAC keys, exchanges `SSH_MSG_NEWKEYS`, and finally
+    /// upgrades [`plain_stream`](Self::plain_stream) into
+    /// [`cipher_stream`](Self::cipher_stream).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::SignatureVerificationFailed`] if the signature does
+    /// not match, [`Error::ServerHostKeyRejectedByUser`] if the notifier
+    /// declines the key, and [`Error::UnexpectedDisconnectMessage`] if the
+    /// server disconnects mid-exchange.
     pub async fn key_exchange(&mut self) -> error::Result<()> {
         let matched = self.matched_methods.as_mut().unwrap();
-
         if let Some(exchange) = matched.kex.exchange() {
             let need = matched
                 .crypt_client_to_server
@@ -1009,6 +1154,8 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send> PlainStream<T> {
     }
 }
 
+/// Repeats the negotiation and key-exchange procedure on a live session
+/// (rekeying), driven by [`Session::renegotiate`](super::Session::renegotiate).
 pub(super) struct RekeyExchange<'a, T, N>
 where
     T: AsyncRead + AsyncWrite + Unpin + Send,

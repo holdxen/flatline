@@ -1,3 +1,12 @@
+//! SSH key exchange (RFC 4253, section 8).
+//!
+//! A [`KeyExchange`] implementation performs one round of the negotiated
+//! key-exchange method: it generates the client's ephemeral public value,
+//! derives the shared secret from the server's reply, hashes the exchange
+//! hash `H` (whose first value doubles as the session ID), and expands the
+//! session keys of RFC 4253, section 7.2. Methods whose group is chosen by
+//! the server additionally expose the [`Exchange`] sub-negotiation.
+
 use crate::ssh::{
     MultiplePrecisionInteger,
     buffer::Producer,
@@ -27,6 +36,7 @@ use crate::error::{Result, builder};
 use indexmap::IndexMap;
 
 algo_list!(
+    "key exchange algorithm",
     all,
     new_all,
     new_kex_by_name,
@@ -46,14 +56,29 @@ algo_list!(
     "diffie-hellman-group1-sha1" => StandardDiffieHellmanImpl::dh_group1_sha1(),
 );
 
+/// All values hashed together into the key-exchange hash `H` (RFC 4253,
+/// section 8).
+///
+/// The first `H` computed for a connection also becomes the session ID, which
+/// is reused in every later key derivation and in authentication signatures.
 pub struct Information<'a> {
+    /// The client's identification string (for example `SSH-2.0-...`),
+    /// without the trailing CRLF.
     pub client_version: &'a str,
+    /// The server's identification string, without the trailing CRLF.
     pub server_version: &'a str,
+    /// The payload of the client's `SSH_MSG_KEXINIT` message.
     pub client_kex_init: &'a [u8],
+    /// The payload of the server's `SSH_MSG_KEXINIT` message.
     pub server_kex_init: &'a [u8],
+    /// The server's host public key blob, as carried in the key-exchange
+    /// reply.
     pub server_host_key: &'a [u8],
+    /// The client's ephemeral public value for this exchange.
     pub client_public_key: &'a [u8],
+    /// The server's ephemeral public value for this exchange.
     pub server_public_key: &'a [u8],
+    /// The shared secret `K` established by the exchange.
     pub secret_key: &'a [u8],
 }
 
@@ -94,11 +119,42 @@ pub struct Information<'a> {
 //     ) -> Result<Vec<u8>>;
 // }
 
+/// Performs one round of an SSH key-exchange method.
+///
+/// Implementations are stateful and driven step by step by the handshake:
+/// `generate_key`, `compute_secret_key`, `compute_hash`, then
+/// `compute_communicate_key` once per derived key.
 pub trait KeyExchange {
+    /// Returns the SSH key-exchange algorithm name (for example
+    /// `curve25519-sha256`) as it appears in `SSH_MSG_KEXINIT` (RFC 4251,
+    /// section 6).
     fn name(&self) -> &str;
+    /// Generates the client's ephemeral key pair and returns the public value
+    /// to send in the key-exchange init message.
+    ///
+    /// For the `diffie-hellman-group-exchange-*` methods, `initialize` on the
+    /// [`Exchange`] sub-negotiation must have supplied the server's group
+    /// first.
     fn generate_key(&mut self) -> Result<Vec<u8>>;
+    /// Computes the shared secret from the server's ephemeral public value
+    /// received in the key-exchange reply.
+    ///
+    /// Fails if `generate_key` has not been called first, or if the peer
+    /// value is malformed or of an unexpected length.
     fn compute_secret_key(&mut self, server_public_key: &[u8]) -> Result<Vec<u8>>;
+    /// Computes the exchange hash `H` over the values in `info` — both
+    /// identification strings, both `SSH_MSG_KEXINIT` payloads, the host key,
+    /// both ephemeral public values and the shared secret — as laid out by
+    /// the algorithm's specification (for example RFC 4253, section 8).
+    ///
+    /// The first `H` of a connection doubles as the session ID.
     fn compute_hash(&mut self, info: Information<'_>) -> Result<Vec<u8>>;
+    /// Derives `len` bytes of session key material from the shared secret and
+    /// exchange hash using the construction of RFC 4253, section 7.2.
+    ///
+    /// `version` is the one-byte derivation label (from `b'A'` to `b'F'`)
+    /// that selects an IV, an encryption key or a MAC key for either
+    /// direction of the connection, and `session_id` is the session ID.
     fn compute_communicate_key(
         &self,
         secret_key: &[u8],
@@ -107,18 +163,50 @@ pub trait KeyExchange {
         version: u8,
         len: usize,
     ) -> Result<Vec<u8>>;
+    /// Returns the message number of the client's key-exchange init message
+    /// (for example `SSH_MSG_KEXDH_INIT` or `SSH_MSG_KEX_ECDH_INIT`).
     fn request_code(&self) -> u8;
+    /// Returns the message number the server replies with (for example
+    /// `SSH_MSG_KEXDH_REPLY`).
     fn response_code(&self) -> u8;
+    /// Returns the [`Exchange`] sub-negotiation for methods that first let
+    /// the server pick a Diffie-Hellman group
+    /// (`diffie-hellman-group-exchange-*`, RFC 4419), or `None` for methods
+    /// that use a fixed group.
     fn exchange(&mut self) -> Option<&mut (dyn Exchange + Send)>;
 }
 
+/// The Diffie-Hellman group-exchange sub-negotiation of the
+/// `diffie-hellman-group-exchange-*` methods (RFC 4419).
+///
+/// The handshake sends `SSH_MSG_KEX_DH_GEX_REQUEST` built from `min`,
+/// `number_of_bits` and `max`, then loads the group the server answers with
+/// via `initialize` before the main key exchange proceeds.
 pub trait Exchange {
+    /// Returns the largest group size in bits the client accepts (the `max`
+    /// field of `SSH_MSG_KEX_DH_GEX_REQUEST`).
     fn max(&self) -> u32;
+    /// Returns the smallest group size in bits the client accepts (the `min`
+    /// field of `SSH_MSG_KEX_DH_GEX_REQUEST`).
     fn min(&self) -> u32;
+    /// Returns the group size in bits the client recommends (the `n` field of
+    /// `SSH_MSG_KEX_DH_GEX_REQUEST`).
     fn number_of_bits(&self) -> u32;
+    /// Sets the recommended group size to `bits`, ignoring values outside the
+    /// `min..=max` range.
     fn set_recommended_number_of_bits(&mut self, bits: u32);
+    /// Loads the prime `p` and generator `g` from the server's
+    /// `SSH_MSG_KEX_DH_GEX_GROUP` message and generates the client's key
+    /// pair.
+    ///
+    /// Fails with an `InvalidPrime` error if `p`'s bit length lies outside
+    /// the accepted range.
     fn initialize(&mut self, p: &[u8], g: &[u8]) -> Result<()>;
+    /// Returns the message number of the group request
+    /// (`SSH_MSG_KEX_DH_GEX_REQUEST`).
     fn request_code(&self) -> u8;
+    /// Returns the message number of the group message the server answers
+    /// with (`SSH_MSG_KEX_DH_GEX_GROUP`).
     fn response_code(&self) -> u8;
 }
 
@@ -136,6 +224,9 @@ pub trait Exchange {
 // pub trait Streamlined: KeyExchange {}
 // pub trait Hybrid: KeyExchange {}
 
+/// Elliptic-curve Diffie-Hellman key exchange over the NIST prime curves
+/// (`ecdh-sha2-nistp256`, `ecdh-sha2-nistp384` and `ecdh-sha2-nistp521`),
+/// as defined in RFC 5656.
 pub struct EllipticCurveDiffieHellmanImpl {
     name: &'static str,
     nid: Nid,
@@ -257,6 +348,13 @@ impl KeyExchange for EllipticCurveDiffieHellmanImpl {
     }
 }
 
+/// Finite-field Diffie-Hellman key exchange with a server-chosen group
+/// (`diffie-hellman-group-exchange-sha1` and
+/// `diffie-hellman-group-exchange-sha256`, RFC 4419).
+///
+/// The client proposes the acceptable group sizes through the [`Exchange`]
+/// sub-negotiation, and the server answers with the prime and generator used
+/// for the exchange.
 pub struct ExchangeDiffieHellmanImpl {
     name: &'static str,
     min: u32,
@@ -460,6 +558,10 @@ impl KeyExchange for ExchangeDiffieHellmanImpl {
     }
 }
 
+/// Finite-field Diffie-Hellman key exchange over a fixed, well-known group:
+/// `diffie-hellman-group1-sha1` (RFC 2409), `diffie-hellman-group14-*`,
+/// `diffie-hellman-group16-sha512` and `diffie-hellman-group18-sha512`
+/// (RFC 3526).
 pub struct StandardDiffieHellmanImpl<'a> {
     name: &'static str,
     p: &'a [u8],
@@ -701,6 +803,8 @@ impl<'a> KeyExchange for StandardDiffieHellmanImpl<'a> {
     // }
 }
 
+/// ECDH key exchange over Curve25519 (`curve25519-sha256`, RFC 8731, and the
+/// older `curve25519-sha256@libssh.org` spelling).
 pub struct Curve25519Impl {
     name: &'static str,
     hasher: &'static MdRef,
@@ -811,6 +915,10 @@ impl KeyExchange for Curve25519Impl {
     }
 }
 
+/// Hybrid post-quantum key exchange `mlkem768x25519-sha256`, as offered by
+/// OpenSSH: it combines ML-KEM-768 with X25519, concatenating both public
+/// values in the init message and hashing the two shared secrets together
+/// with SHA-256.
 pub struct MlKem768X25519 {
     mlkem: Option<MlKemKeyPair<2400, 1184>>,
     x25519: Option<PKey<Private>>,

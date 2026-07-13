@@ -6,7 +6,8 @@ use tokio::sync::{mpsc, oneshot};
 use crate::error::builder;
 use crate::session::channel::{IdentityPair, TtyOpcode};
 use crate::session::{
-    AuthenticationMethod, KeyboardInteractive, Notifier, RequestFailureSnafu, UnexpectedBehaviourSnafu, forward,
+    AuthenticationMethod, KeyboardInteractive, Notifier, RequestFailureSnafu,
+    UnexpectedBehaviourSnafu, forward,
 };
 use crate::ssh::buffer::Consumer;
 use crate::ssh::msg::{Message, Signal};
@@ -833,7 +834,10 @@ where
                 } => {
                     break Ok(super::AuthenticateResult::Failure {
                         partial_success,
-                        allow_methods: allow_methods.into_iter().map(|m| AuthenticationMethod::from(m)).collect(),
+                        allow_methods: allow_methods
+                            .into_iter()
+                            .map(|m| AuthenticationMethod::from(m))
+                            .collect(),
                     });
                 }
                 Message::Unrecognized {
@@ -2888,7 +2892,10 @@ where
                     allow_methods,
                     partial_success,
                 } => Ok(super::AuthenticateResult::Failure {
-                    allow_methods: allow_methods.into_iter().map(|v| AuthenticationMethod::from(v)).collect(),
+                    allow_methods: allow_methods
+                        .into_iter()
+                        .map(|v| AuthenticationMethod::from(v))
+                        .collect(),
                     partial_success,
                 }),
                 Message::Unrecognized {
@@ -2925,7 +2932,10 @@ where
                     allow_methods,
                     partial_success,
                 } => Ok(super::AuthenticateResult::Failure {
-                    allow_methods: allow_methods.into_iter().map(|v| AuthenticationMethod::from(v)).collect(),
+                    allow_methods: allow_methods
+                        .into_iter()
+                        .map(|v| AuthenticationMethod::from(v))
+                        .collect(),
                     partial_success,
                 }),
                 _ => return None,
@@ -3024,7 +3034,10 @@ where
                         allow_methods,
                     } => Ok(Some(super::AuthenticateResult::Failure {
                         partial_success,
-                        allow_methods: allow_methods.into_iter().map(|v| AuthenticationMethod::from(v)).collect(),
+                        allow_methods: allow_methods
+                            .into_iter()
+                            .map(|v| AuthenticationMethod::from(v))
+                            .collect(),
                     })),
                     Message::Unrecognized {
                         code: SSH_MSG_USERAUTH_PK_OK,
@@ -3085,7 +3098,10 @@ where
                     allow_methods,
                 } => Ok(super::AuthenticateResult::Failure {
                     partial_success,
-                    allow_methods: allow_methods.into_iter().map(|v| AuthenticationMethod::from(v)).collect(),
+                    allow_methods: allow_methods
+                        .into_iter()
+                        .map(|v| AuthenticationMethod::from(v))
+                        .collect(),
                 }),
                 _ => return None,
             })

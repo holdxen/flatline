@@ -1,3 +1,11 @@
+//! SSH packet compression (RFC 4253, section 6.2).
+//!
+//! [`Encode`] compresses outgoing packet payloads before they are encrypted
+//! and [`Decode`] decompresses incoming payloads after decryption. Each
+//! direction of the connection negotiates its own algorithm, and the
+//! compression state is established when the new keys take effect and then
+//! persists for the rest of the connection.
+
 use crate::error::Result;
 use flate2::{Compress, Compression, Decompress, Status};
 use std::mem;
@@ -6,6 +14,7 @@ use super::Factory;
 use indexmap::IndexMap;
 
 algo_list!(
+    "compression algorithm",
     encode_all,
     new_encode_all,
     new_encode_by_name,
@@ -16,6 +25,7 @@ algo_list!(
 );
 
 algo_list!(
+    "compression algorithm",
     decode_all,
     new_decode_all,
     new_decode_by_name,
@@ -25,25 +35,74 @@ algo_list!(
     "none" => Never::default(),
 );
 
+/// Creates a factory for the `none` encoder, which passes packet payloads
+/// through unchanged instead of compressing them.
 pub fn none_encode() -> Factory<dyn Encode + Send> {
     create_factory!(Never::default())
 }
 
+/// Creates a factory for the `none` decoder, which passes packet payloads
+/// through unchanged instead of decompressing them.
 pub fn none_decode() -> Factory<dyn Decode + Send> {
     create_factory!(Never::default())
 }
 
+/// Compresses outgoing SSH packet payloads before they are encrypted.
+///
+/// One instance serves one direction of the connection; `update` and
+/// `finalize` are invoked once per packet by the packet layer.
 pub trait Encode {
+    /// Returns the SSH compression algorithm name (`zlib`,
+    /// `zlib@openssh.com` or `none`) as it appears in `SSH_MSG_KEXINIT`.
     fn name(&self) -> &str;
+    /// Returns whether payloads are also compressed while user authentication
+    /// is still in progress.
+    ///
+    /// This encodes the "delayed compression" distinction: plain `zlib`
+    /// compresses from the moment the keys take effect, including the user
+    /// authentication exchange, while OpenSSH's `zlib@openssh.com` sends
+    /// everything uncompressed until authentication has succeeded and only
+    /// compresses from then on.
     fn compress_in_authentication(&self) -> bool;
+    /// Compresses one packet payload, buffering the output until
+    /// [`finalize`](Encode::finalize) is called.
+    ///
+    /// Returns an error if the underlying compression stream fails.
     fn update(&mut self, data: &[u8]) -> Result<()>;
+    /// Returns all compressed output produced since the last call and clears
+    /// the output buffer.
+    ///
+    /// The compression stream itself stays stateful across packets.
     fn finalize(&mut self) -> Result<Vec<u8>>;
 }
 
+/// Decompresses incoming SSH packet payloads after they are decrypted.
+///
+/// One instance serves one direction of the connection; `update` and
+/// `finalize` are invoked once per packet by the packet layer.
 pub trait Decode {
+    /// Returns the SSH compression algorithm name (`zlib`,
+    /// `zlib@openssh.com` or `none`) as it appears in `SSH_MSG_KEXINIT`.
     fn name(&self) -> &str;
+    /// Returns whether payloads are also decompressed while user
+    /// authentication is still in progress.
+    ///
+    /// This encodes the "delayed compression" distinction: plain `zlib`
+    /// compresses from the moment the keys take effect, including the user
+    /// authentication exchange, while OpenSSH's `zlib@openssh.com` sends
+    /// everything uncompressed until authentication has succeeded and only
+    /// compresses from then on.
     fn compress_in_authentication(&self) -> bool;
+    /// Decompresses one packet payload, buffering the output until
+    /// [`finalize`](Decode::finalize) is called.
+    ///
+    /// Returns an error if the underlying decompression stream fails, which
+    /// can also indicate a corrupt or malicious payload.
     fn update(&mut self, data: &[u8]) -> Result<()>;
+    /// Returns all decompressed output produced since the last call and
+    /// clears the output buffer.
+    ///
+    /// The decompression stream itself stays stateful across packets.
     fn finalize(&mut self) -> Result<Vec<u8>>;
 }
 

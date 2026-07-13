@@ -1,3 +1,13 @@
+//! Symmetric encryption of SSH binary packets (RFC 4253, section 6).
+//!
+//! [`Encrypt`] protects outgoing packets and [`Decrypt`] protects incoming
+//! ones once the session keys are active. In addition to plain
+//! encrypt-and-MAC ciphers, the traits cover the AEAD ciphers
+//! `aes128-gcm@openssh.com`, `aes256-gcm@openssh.com` and
+//! `chacha20-poly1305@openssh.com`, whose framing of the binary packet
+//! (length header handled as associated data, trailing authentication tag)
+//! follows OpenSSH's conventions.
+
 // pub encrypt: Box<dyn Encrypt + Send>,
 // pub decrypt: Box<dyn Decrypt + Send>,
 // pub decode: Box<dyn Decode + Send>,
@@ -17,6 +27,7 @@ use crate::error::{self, Result, builder};
 use indexmap::IndexMap;
 
 algo_list!(
+    "cipher",
     encrypt_all,
     new_encrypt_all,
     new_encrypt_by_name,
@@ -35,6 +46,7 @@ algo_list!(
 );
 
 algo_list!(
+    "cipher",
     decrypt_all,
     new_decrypt_all,
     new_decrypt_by_name,
@@ -52,34 +64,152 @@ algo_list!(
     "3des-cbc" => CounterModeOrCipherBlockChaining::des_ede3_cbc(),
 );
 
+/// Encrypts outgoing SSH binary packets once the session keys are active.
+///
+/// One instance serves one direction of a connection (client-to-server or
+/// server-to-client). The packet layer drives it once per packet:
+/// `update_sequence_number`, `additional_authenticated_data`, `update`,
+/// `finalize`, `authentication_tag`.
 pub trait Encrypt {
+    /// Returns the SSH cipher name (`aes256-ctr`,
+    /// `chacha20-poly1305@openssh.com`, ...) as it appears in
+    /// `SSH_MSG_KEXINIT`.
     fn name(&self) -> &str;
+    /// Returns the number of initialization-vector bytes required by
+    /// `initialize`.
+    ///
+    /// Ciphers that take their nonce from the packet sequence number, such as
+    /// `chacha20-poly1305@openssh.com`, need no IV and report `0`.
     fn iv_len(&self) -> usize;
+    /// Returns the number of key bytes required by `initialize`.
+    ///
+    /// This is the total key material derived from the key exchange, which is
+    /// 64 bytes for `chacha20-poly1305@openssh.com` (two 32-byte keys).
     fn key_len(&self) -> usize;
+    /// Returns the cipher block size in bytes, which the packet layer uses to
+    /// compute the padding length of every packet (RFC 4253, section 6).
     fn block_size(&self) -> usize;
+    /// Initializes the cipher with the `iv` and `key` derived during key
+    /// exchange; must be called before any other method.
     fn initialize(&mut self, iv: &[u8], key: &[u8]) -> error::Result<()>;
+    /// Encrypts `data` and appends the ciphertext to `buf` (after any
+    /// contents it already has), returning the number of bytes written to
+    /// `buf`.
     fn update(&mut self, data: &[u8], buf: &mut Vec<u8>) -> error::Result<usize>;
+    /// Flushes the cipher's final internal state into `buf`, appending it
+    /// after any existing contents and returning the number of bytes written.
+    ///
+    /// Called once per packet after `update`.
     fn finalize(&mut self, buf: &mut Vec<u8>) -> error::Result<usize>;
 
+    /// Returns whether this is an AEAD cipher (`aes*-gcm@openssh.com` or
+    /// `chacha20-poly1305@openssh.com`).
+    ///
+    /// Despite the method's name, OpenSSH's chacha20-poly1305 variant reports
+    /// `true` as well. The packet layer uses this to select OpenSSH's AEAD
+    /// framing of the binary packet: the 4-byte packet length header is
+    /// passed through `additional_authenticated_data` rather than encrypted
+    /// along with the payload, and the packet ends with a `tag_len`-byte
+    /// authentication tag.
     fn is_galois_counter_mode(&self) -> bool;
+    /// Returns the length in bytes of the per-packet authentication tag
+    /// appended to each packet, or `0` for ciphers that provide no
+    /// authentication of their own.
     fn tag_len(&self) -> usize;
+    /// Supplies the current packet sequence number before a packet is
+    /// processed.
+    ///
+    /// `chacha20-poly1305@openssh.com` uses the sequence number as its nonce,
+    /// so this re-derives the per-packet Poly1305 key for every packet;
+    /// AES-GCM advances its IV invocation counter internally and the plain
+    /// ciphers ignore the value.
     fn update_sequence_number(&mut self, number: u32) -> error::Result<()>;
+    /// Handles the packet's 4-byte length header for AEAD ciphers.
+    ///
+    /// On encryption `data` holds the plaintext header; implementations may
+    /// replace it in place (`chacha20-poly1305@openssh.com` encrypts it with
+    /// its dedicated header key) and feed it to the AEAD as associated data
+    /// together with the packet body. Called before `update`; a no-op for
+    /// non-AEAD ciphers.
     fn additional_authenticated_data(&mut self, data: &mut [u8]) -> error::Result<()>;
+    /// Writes the authentication tag of the packet just encrypted into `tag`,
+    /// which must be `tag_len` bytes long; the packet layer appends it after
+    /// the ciphertext. A no-op for non-AEAD ciphers.
     fn authentication_tag(&mut self, tag: &mut [u8]) -> error::Result<()>;
 }
+/// Decrypts incoming SSH binary packets once the session keys are active.
+///
+/// One instance serves one direction of a connection. The packet layer drives
+/// it once per packet: `update_sequence_number`,
+/// `additional_authenticated_data`, `update`, `authentication_tag`,
+/// `finalize`.
 pub trait Decrypt {
+    /// Returns the SSH cipher name (`aes256-ctr`,
+    /// `chacha20-poly1305@openssh.com`, ...) as it appears in
+    /// `SSH_MSG_KEXINIT`.
     fn name(&self) -> &str;
+    /// Returns the number of initialization-vector bytes required by
+    /// `initialize`.
+    ///
+    /// Ciphers that take their nonce from the packet sequence number, such as
+    /// `chacha20-poly1305@openssh.com`, need no IV and report `0`.
     fn iv_len(&self) -> usize;
+    /// Returns the number of key bytes required by `initialize`.
+    ///
+    /// This is the total key material derived from the key exchange, which is
+    /// 64 bytes for `chacha20-poly1305@openssh.com` (two 32-byte keys).
     fn key_len(&self) -> usize;
+    /// Returns the cipher block size in bytes, which the packet layer uses to
+    /// validate the padding length of every packet (RFC 4253, section 6).
     fn block_size(&self) -> usize;
+    /// Initializes the cipher with the `iv` and `key` derived during key
+    /// exchange; must be called before any other method.
     fn initialize(&mut self, iv: &[u8], key: &[u8]) -> error::Result<()>;
+    /// Decrypts `data` and appends the plaintext to `out` (after any contents
+    /// it already has), returning the number of bytes written to `out`.
     fn update(&mut self, data: &[u8], out: &mut Vec<u8>) -> error::Result<usize>;
+    /// Flushes the cipher's final internal state into `buf`, appending it
+    /// after any existing contents and returning the number of bytes written.
+    ///
+    /// For AEAD ciphers this also checks the packet's authentication tag
+    /// against the one supplied by `authentication_tag` and fails if they do
+    /// not match (for `chacha20-poly1305@openssh.com` with an
+    /// `Error::MacVerificationFailed` error), so a successful return means
+    /// the packet was authentic.
     fn finalize(&mut self, buf: &mut Vec<u8>) -> error::Result<usize>;
 
+    /// Returns whether this is an AEAD cipher (`aes*-gcm@openssh.com` or
+    /// `chacha20-poly1305@openssh.com`).
+    ///
+    /// Despite the method's name, OpenSSH's chacha20-poly1305 variant reports
+    /// `true` as well. The packet layer uses this to select OpenSSH's AEAD
+    /// framing of the binary packet: the 4-byte packet length header is
+    /// read through `additional_authenticated_data` and the bytes following
+    /// the payload are treated as a `tag_len`-byte authentication tag.
     fn is_galois_counter_mode(&self) -> bool;
+    /// Returns the length in bytes of the authentication tag that follows the
+    /// payload of each packet, or `0` for ciphers that provide no
+    /// authentication of their own.
     fn tag_len(&self) -> usize;
+    /// Supplies the current packet sequence number before a packet is
+    /// processed.
+    ///
+    /// `chacha20-poly1305@openssh.com` uses the sequence number as its nonce,
+    /// so this re-derives the per-packet Poly1305 key for every packet;
+    /// AES-GCM advances its IV invocation counter internally and the plain
+    /// ciphers ignore the value.
     fn update_sequence_number(&mut self, number: u32) -> error::Result<()>;
+    /// Handles the packet's 4-byte length header for AEAD ciphers.
+    ///
+    /// `data` holds the header bytes read from the wire; implementations
+    /// authenticate them as associated data (`chacha20-poly1305@openssh.com`
+    /// also decrypts them in place) so the length is covered by the packet's
+    /// tag. Called before `update`; a no-op for non-AEAD ciphers.
     fn additional_authenticated_data(&mut self, data: &mut [u8]) -> error::Result<()>;
+    /// Supplies the expected authentication tag read from the packet.
+    ///
+    /// The tag is compared against the computed one when `finalize` runs,
+    /// which fails if they differ. A no-op for non-AEAD ciphers.
     fn authentication_tag(&mut self, data: &[u8]) -> error::Result<()>;
 }
 

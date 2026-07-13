@@ -1,3 +1,20 @@
+//! TCP/IP and stream-local (Unix socket) forwarding.
+//!
+//! Two directions are supported:
+//!
+//! - **Remote forwarding** — ask the server to listen somewhere and hand the
+//!   accepted connections back here:
+//!   [`Session::listen_on_server`](crate::session::Session::listen_on_server) /
+//!   [`Session::listen_on_server_local`](crate::session::Session::listen_on_server_local)
+//!   return a [`Listener`].
+//! - **Direct forwarding** — open a channel straight to a target:
+//!   [`Session::connect_to_server`](crate::session::Session::connect_to_server) /
+//!   [`Session::connect_to_server_local`](crate::session::Session::connect_to_server_local)
+//!   return a [`Stream`].
+//!
+//! A [`Listener`] cancels its forward when dropped, and a [`Stream`] closes
+//! its channel when dropped.
+
 use super::Event;
 use super::{UnexpectedBehaviourSnafu, UnexpectedReceivingError, UnexpectedSendingError, channel};
 use crate::error;
@@ -7,37 +24,65 @@ use snafu::OptionExt;
 use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::{mpsc, oneshot};
 
+/// Wildcard address accepted by forwarding requests: the empty string, meaning
+/// "every interface" for both IPv4 and IPv6.
 pub const ALL: &str = "";
+/// The IPv4 wildcard address `0.0.0.0`.
 pub const IPV4_ALL: &str = "0.0.0.0";
+/// The IPv6 wildcard address `::`.
 pub const IPV6_ALL: &str = "::";
+/// The `localhost` name, accepted wherever a forwarding address is expected.
 pub const LOCALHOST: &str = "localhost";
+/// The IPv4 loopback address `127.0.0.1`.
 pub const IPV4_LOCALHOST: &str = "127.0.0.1";
+/// The IPv6 loopback address `::1`.
 pub const IPV6_LOCALHOST: &str = "::1";
 
+/// An address used by forwarding requests, as a name plus a port.
+///
+/// The host part is a string because forwarding addresses may be hostnames or
+/// wildcard names (see [`ALL`], [`LOCALHOST`], ...) as well as IP literals.
 #[derive(Debug, Default, Clone, PartialEq, Eq, Hash)]
 pub struct SocketAddr {
+    /// Hostname, IP literal, or one of the wildcard constants.
     pub host: String,
+    /// Port number; `0` asks the server to choose one when listening.
     pub port: u16,
 }
 
 impl SocketAddr {
+    /// Creates an address from `host` and `port`.
     pub fn new(host: String, port: u16) -> Self {
         Self { host, port }
     }
 }
 
 impl ToString for SocketAddr {
+    /// Formats the address as `host:port`.
     fn to_string(&self) -> String {
         format!("{}:{}", self.host, self.port)
     }
 }
 
+/// A chunk of traffic read from a forwarded connection.
 pub enum Message {
+    /// The peer closed the connection and no more data will arrive.
     Close,
+    /// The peer sent EOF: no more data will be sent, but the channel is still open.
     Eof,
+    /// Application data received from the peer.
     Bytes(Vec<u8>),
 }
 
+/// A server-side listener created by a remote-forwarding request.
+///
+/// `A` is the address type reported by [`Listener::addr`] (the bound
+/// [`SocketAddr`] for TCP forwards, the socket `path` for stream-local
+/// forwards) and `B` is the extra information delivered alongside each
+/// accepted connection (the originator [`SocketAddr`] for TCP forwards, `()`
+/// for stream-local forwards).
+///
+/// Dropping the listener asks the server to stop forwarding.
 #[derive(derive_more::Debug)]
 pub struct Listener<A: 'static, B> {
     #[debug(skip)]
@@ -72,6 +117,10 @@ impl<A: 'static, B> Listener<A, B> {
         }
     }
 
+    /// Returns the address this listener is bound to.
+    ///
+    /// For TCP forwards this reflects the port the server actually assigned
+    /// when the requested port was `0`.
     pub fn addr(&self) -> &A {
         &self.addr
     }
@@ -142,6 +191,11 @@ fn do_drop<'a, 'b>(value: &'a (dyn std::any::Any + 'b), session: &mpsc::Sender<E
 }
 
 impl Listener<String, ()> {
+    /// Cancels a stream-local forward and waits for the server's reply.
+    ///
+    /// `want_reply` asks the server to answer the cancel request. The
+    /// listener is consumed; dropping it later would not send a second
+    /// cancellation.
     pub async fn cancel(mut self, want_reply: bool) -> error::Result<()> {
         let (sender, receiver) = oneshot::channel();
         let event = Event::GlobalRequestCancelStreamLocalForward {
@@ -156,6 +210,10 @@ impl Listener<String, ()> {
         receiver.receive_next().await?
     }
 
+    /// Waits for the next connection forwarded to the socket path this
+    /// listener was created for.
+    ///
+    /// Returns an error if the session shut down while waiting.
     pub async fn accept(&mut self) -> error::Result<Stream> {
         let stream = self
             .receiver
@@ -170,6 +228,11 @@ impl Listener<String, ()> {
 }
 
 impl Listener<SocketAddr, SocketAddr> {
+    /// Cancels a TCP/IP forward and waits for the server's reply.
+    ///
+    /// `want_reply` asks the server to answer the cancel request. The
+    /// listener is consumed; dropping it later would not send a second
+    /// cancellation.
     pub async fn cancel(mut self, want_reply: bool) -> error::Result<()> {
         let (sender, receiver) = oneshot::channel();
         let event = Event::GlobalRequestCancelTcpIpForward {
@@ -184,6 +247,11 @@ impl Listener<SocketAddr, SocketAddr> {
         receiver.receive_next().await?
     }
 
+    /// Waits for the next connection accepted by the forwarded port.
+    ///
+    /// Returns the data [`Stream`] together with the originator's
+    /// [`SocketAddr`] — the address of the peer that connected to the
+    /// forwarded port.
     pub async fn accept(&mut self) -> error::Result<(Stream, SocketAddr)> {
         let stream = self
             .receiver
@@ -197,6 +265,11 @@ impl Listener<SocketAddr, SocketAddr> {
     }
 }
 
+/// A byte stream carried over a connection channel.
+///
+/// This is what a forwarded connection looks like to the application: read
+/// with [`Stream::receive`], write with [`Stream::send`]. Dropping the stream
+/// closes the underlying channel.
 #[derive(Debug)]
 pub struct Stream {
     channel: Channel,
@@ -207,14 +280,22 @@ impl Stream {
         Self { channel }
     }
 
+    /// Closes the channel behind this stream, consuming the stream.
     pub async fn close(self) -> error::Result<()> {
         self.channel.close().await
     }
 
+    /// Sends EOF to the peer while leaving the channel open.
     pub async fn eof(&self) -> error::Result<()> {
         self.channel.eof().await
     }
 
+    /// Reads the next chunk of traffic, waiting for one if necessary.
+    ///
+    /// Returns [`Message::Bytes`] for data, [`Message::Eof`] when the peer is
+    /// done sending, and [`Message::Close`] when the channel is gone. Any
+    /// message that cannot occur on a forwarding channel (standard error,
+    /// exit status, ...) is logged and skipped.
     pub async fn receive(&mut self) -> error::Result<Message> {
         loop {
             match self.channel.receive().await? {
@@ -239,6 +320,10 @@ impl Stream {
         }
     }
 
+    /// Writes `data` to the peer, returning how many bytes were accepted.
+    ///
+    /// The transport may accept fewer bytes than supplied; callers should
+    /// keep sending until everything has been written.
     pub async fn send(&self, data: Vec<u8>) -> error::Result<usize> {
         self.channel.send(data).await
     }

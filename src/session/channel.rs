@@ -1,3 +1,33 @@
+//! SSH connection-layer channels (RFC 4254) and terminal modes (RFC 4254 §8).
+//!
+//! A channel is an independent, flow-controlled stream of bytes carried over
+//! an established SSH session. Each side labels the channel with its own
+//! number (see [`IdentityPair`]); either side may send data, signal
+//! end-of-file, or close the channel.
+//!
+//! # Obtaining a channel
+//!
+//! Open one with
+//! [`Session::channel_open_default`](crate::session::Session::channel_open_default)
+//! (or [`Session::channel_open`](crate::session::Session::channel_open) with
+//! explicit window sizes); SFTP and forwarding helpers open channels of their
+//! own.
+//!
+//! # Using a channel
+//!
+//! Ask the server to start something with the `request_*` methods:
+//! [`Channel::request_exec`] runs a single command, [`Channel::request_shell`]
+//! starts an interactive shell, [`Channel::request_pty`] allocates a
+//! pseudo-terminal (its settings are described by [`TtyOpcode`]), and the
+//! remaining requests ([`Channel::request_env`], [`Channel::request_signal`],
+//! [`Channel::request_window_change`], [`Channel::request_x11`],
+//! [`Channel::request_agent`], [`Channel::request_break`]) send the other
+//! RFC 4254 channel requests. Send bytes with [`Channel::send`] and read the
+//! resulting [`Message`]s with [`Channel::receive`] (waits for the next
+//! message) or [`Channel::try_receive`] (returns immediately). Dropping a
+//! [`Channel`] closes it.
+//!
+//! This module is re-exported at the crate root as [`channel`].
 use super::{Event, UnexpectedReceivingError, UnexpectedSendingError, channel};
 use crate::{error, ssh::msg::Signal};
 use bytes::{Buf, BytesMut};
@@ -5,291 +35,367 @@ use snafu::OptionExt;
 use tokio::sync::mpsc::error::{TryRecvError, TrySendError};
 use tokio::sync::{mpsc, oneshot};
 
+/// The exit status of the remote command or shell, as reported by the server.
+///
+/// Received in a [`Message::Exit`].
 #[derive(Debug, Clone)]
 pub enum ExitStatus {
+    /// The process terminated normally with the given exit code.
     Normal(u32),
+    /// The process was killed by a signal instead of exiting on its own.
     Interrupt {
+        /// The signal that killed the process (e.g. `TERM`).
         signal: Signal,
+        /// Whether the process produced a core dump.
         core_dumped: bool,
+        /// A human-readable error message supplied by the server.
         error_message: String,
     },
 }
 
 impl ExitStatus {
+    /// Returns `true` only for [`ExitStatus::Normal`] with an exit code of `0`.
     pub fn success(&self) -> bool {
         matches!(self, Self::Normal(0))
     }
 }
 
+/// A message received from the server for a [`Channel`].
 #[derive(derive_more::Debug)]
 pub enum Message {
-    /// It means the channel was closed by server, it can't be read or written;
+    /// The server closed the channel; it can no longer be read from or written to.
     Close,
-    /// It means no more data will be sent by server;
+    /// The server sent end-of-file and will send no more data (the channel
+    /// stays open for sending).
     Eof,
-    /// Obviously this is the standard output data, println!() in rust;
+    /// Standard output of the remote process, as raw bytes (what `println!` writes).
     Stdout(#[debug(skip)] Vec<u8>),
-    /// Obviously this is the standard error data, eprintln!() in rust;
+    /// Standard error of the remote process, as raw bytes (what `eprintln!` writes).
     Stderr(#[debug(skip)] Vec<u8>),
-    /// When the channel::exec is called and the process ends, the server will send this to the client;
-    /// it may be sent before the Eof
+    /// The exit status of the remote process, sent when it terminates; it may
+    /// arrive before [`Message::Eof`].
     Exit(ExitStatus),
+    /// The server asked to switch XON/XOFF flow control on or off (the
+    /// `xon-xoff` channel request).
     FlowControl {
+        /// Whether XON/XOFF flow control should be turned on.
         on: bool,
     },
+    /// The server enlarged this channel's send window by `size` bytes
+    /// (`SSH_MSG_CHANNEL_WINDOW_ADJUST`), so that much more data may be sent;
+    /// this is a window update, not a terminal-size change (report a new size
+    /// with [`Channel::request_window_change`]).
     WindowChange {
+        /// The number of bytes added to the send window.
         size: u32,
     },
 }
 
-/// SSH Terminal Modes Opcode 定义
+/// Definition of the SSH terminal-mode opcodes.
 ///
-/// 基于 RFC 4254 Section 8 和 OpenSSH 扩展
+/// Based on RFC 4254 Section 8 and OpenSSH extensions.
 ///
-/// 参考文档：
-/// - https://tools.ietf.org/html/rfc4254#section-8
-/// - https://www.iana.org/assignments/ssh-parameters/ssh-parameters.xhtml#ssh-parameters-16
-///   Terminal Modes Opcode 枚举
+/// References:
+/// - <https://tools.ietf.org/html/rfc4254#section-8>
+/// - <https://www.iana.org/assignments/ssh-parameters/ssh-parameters.xhtml#ssh-parameters-16>
+///   (Terminal Modes Opcode enum)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum TtyOpcode {
     // ========== 结束标记 ==========
-    /// 标记 terminal modes 数据的结束
+    /// Marks the end of the terminal modes data.
     TtyOpEnd = 0,
 
     // ========== 特殊字符类 (1-18) ==========
-    /// 中断信号字符 (通常为 Ctrl+C)
-    /// Value: 0-127 (ASCII 字符值), 255 表示禁用
+    /// Interrupt signal character (usually `Ctrl+C`).
+    ///
+    /// Value: 0-127 (ASCII character), 255 disables it.
     VIntr = 1,
 
-    /// 退出信号字符 (通常为 Ctrl+\)
-    /// Value: 0-127 (ASCII 字符值), 255 表示禁用
+    /// Quit signal character (usually `Ctrl+\`).
+    ///
+    /// Value: 0-127 (ASCII character), 255 disables it.
     VQuit = 2,
 
-    /// 擦除字符 (通常为 Backspace)
-    /// Value: 0-127 (ASCII 字符值), 255 表示禁用
+    /// Erase character (usually `Backspace`).
+    ///
+    /// Value: 0-127 (ASCII character), 255 disables it.
     VErase = 3,
 
-    /// 删除整行字符 (通常为 Ctrl+U)
-    /// Value: 0-127 (ASCII 字符值), 255 表示禁用
+    /// Kill (erase the whole line) character (usually `Ctrl+U`).
+    ///
+    /// Value: 0-127 (ASCII character), 255 disables it.
     VKill = 4,
 
-    /// 文件结束字符 (通常为 Ctrl+D)
-    /// Value: 0-127 (ASCII 字符值), 255 表示禁用
+    /// End-of-file character (usually `Ctrl+D`).
+    ///
+    /// Value: 0-127 (ASCII character), 255 disables it.
     VEOF = 5,
 
-    /// 额外的行结束字符
-    /// Value: 0-127 (ASCII 字符值), 255 表示禁用
+    /// Additional end-of-line character.
+    ///
+    /// Value: 0-127 (ASCII character), 255 disables it.
     VEOL = 6,
 
-    /// 第二个额外的行结束字符
-    /// Value: 0-127 (ASCII 字符值), 255 表示禁用
+    /// Second additional end-of-line character.
+    ///
+    /// Value: 0-127 (ASCII character), 255 disables it.
     VEOL2 = 7,
 
-    /// 恢复输出字符 (通常为 Ctrl+Q)
-    /// Value: 0-127 (ASCII 字符值), 255 表示禁用
+    /// Resume-output character (usually `Ctrl+Q`).
+    ///
+    /// Value: 0-127 (ASCII character), 255 disables it.
     VStart = 8,
 
-    /// 停止输出字符 (通常为 Ctrl+S)
-    /// Value: 0-127 (ASCII 字符值), 255 表示禁用
+    /// Stop-output character (usually `Ctrl+S`).
+    ///
+    /// Value: 0-127 (ASCII character), 255 disables it.
     VStop = 9,
 
-    /// 挂起信号字符 (通常为 Ctrl+Z)
-    /// Value: 0-127 (ASCII 字符值), 255 表示禁用
+    /// Suspend signal character (usually `Ctrl+Z`).
+    ///
+    /// Value: 0-127 (ASCII character), 255 disables it.
     VSusp = 10,
 
-    /// 延迟挂起字符 (通常为 Ctrl+Y)
-    /// Value: 0-127 (ASCII 字符值), 255 表示禁用
+    /// Delayed suspend character (usually `Ctrl+Y`).
+    ///
+    /// Value: 0-127 (ASCII character), 255 disables it.
     VDSusp = 11,
 
-    /// 重新打印行字符 (通常为 Ctrl+R)
-    /// Value: 0-127 (ASCII 字符值), 255 表示禁用
+    /// Reprint-line character (usually `Ctrl+R`).
+    ///
+    /// Value: 0-127 (ASCII character), 255 disables it.
     VReprint = 12,
 
-    /// 删除单词字符 (通常为 Ctrl+W)
-    /// Value: 0-127 (ASCII 字符值), 255 表示禁用
+    /// Word-erase character (usually `Ctrl+W`).
+    ///
+    /// Value: 0-127 (ASCII character), 255 disables it.
     VWerase = 13,
 
-    /// 字面量下一个字符 (通常为 Ctrl+V)
-    /// Value: 0-127 (ASCII 字符值), 255 表示禁用
+    /// Literal-next character (usually `Ctrl+V`).
+    ///
+    /// Value: 0-127 (ASCII character), 255 disables it.
     VLNext = 14,
 
-    /// 刷新输出字符 (OpenSSH 扩展)
-    /// Value: 0-127 (ASCII 字符值), 255 表示禁用
+    /// Flush-output character (OpenSSH extension).
+    ///
+    /// Value: 0-127 (ASCII character), 255 disables it.
     VFlush = 15,
 
-    /// 切换 shell 层字符 (OpenSSH 扩展)
-    /// Value: 0-127 (ASCII 字符值), 255 表示禁用
+    /// Switch shell-layer character (OpenSSH extension).
+    ///
+    /// Value: 0-127 (ASCII character), 255 disables it.
     VSwitch = 16,
 
-    /// 状态请求字符 (通常为 Ctrl+T)
-    /// Value: 0-127 (ASCII 字符值), 255 表示禁用
+    /// Status-request character (usually `Ctrl+T`).
+    ///
+    /// Value: 0-127 (ASCII character), 255 disables it.
     VStatus = 17,
 
-    /// 丢弃输出字符
-    /// Value: 0-127 (ASCII 字符值), 255 表示禁用
+    /// Discard-output character.
+    ///
+    /// Value: 0-127 (ASCII character), 255 disables it.
     VDiscard = 18,
 
     // ========== 输入标志类 (30-42) ==========
-    /// 忽略奇偶校验错误
-    /// Value: 0 (不忽略) 或 1 (忽略)
+    /// Ignore parity and framing errors.
+    ///
+    /// Value: 0 (do not ignore) or 1 (ignore).
     IGNPAR = 30,
 
-    /// 标记奇偶校验和帧错误
-    /// Value: 0 (不标记) 或 1 (标记)
+    /// Mark parity and framing errors.
+    ///
+    /// Value: 0 (do not mark) or 1 (mark).
     PARMRK = 31,
 
-    /// 启用输入奇偶校验
-    /// Value: 0 (禁用) 或 1 (启用)
+    /// Enable input parity checking.
+    ///
+    /// Value: 0 (off) or 1 (on).
     INPCK = 32,
 
-    /// 剥除第 8 位
-    /// Value: 0 (不剥除) 或 1 (剥除)
+    /// Strip the 8th (high) bit from input.
+    ///
+    /// Value: 0 (do not strip) or 1 (strip).
     ISTRIP = 33,
 
-    /// 将输入的 NL 转换为 CR
-    /// Value: 0 (不转换) 或 1 (转换)
+    /// Map input NL to CR.
+    ///
+    /// Value: 0 (do not convert) or 1 (convert).
     INLCR = 34,
 
-    /// 忽略输入的 CR
-    /// Value: 0 (不忽略) 或 1 (忽略)
+    /// Ignore input CR.
+    ///
+    /// Value: 0 (do not ignore) or 1 (ignore).
     IGNCR = 35,
 
-    /// 将输入的 CR 转换为 NL
-    /// Value: 0 (不转换) 或 1 (转换)
+    /// Map input CR to NL.
+    ///
+    /// Value: 0 (do not convert) or 1 (convert).
     ICRNL = 36,
 
-    /// 将输入的大写转换为小写
-    /// Value: 0 (不转换) 或 1 (转换)
+    /// Map uppercase input characters to lowercase.
+    ///
+    /// Value: 0 (do not convert) or 1 (convert).
     IUCLC = 37,
 
-    /// 启用输出的 XON/XOFF 流控
-    /// Value: 0 (禁用) 或 1 (启用)
+    /// Enable XON/XOFF flow control on output.
+    ///
+    /// Value: 0 (off) or 1 (on).
     IXON = 38,
 
-    /// 任意字符恢复输出
-    /// Value: 0 (仅 XON) 或 1 (任意字符)
+    /// Any character restarts output.
+    ///
+    /// Value: 0 (only XON) or 1 (any character).
     IXANY = 39,
 
-    /// 启用输入的 XON/XOFF 流控
-    /// Value: 0 (禁用) 或 1 (启用)
+    /// Enable XON/XOFF flow control on input.
+    ///
+    /// Value: 0 (off) or 1 (on).
     IXOFF = 40,
 
-    /// 输入队列满时响铃
-    /// Value: 0 (不响铃) 或 1 (响铃)
+    /// Ring the bell when the input queue is full.
+    ///
+    /// Value: 0 (do not ring) or 1 (ring).
     IMAXBEL = 41,
 
-    /// 输入为 UTF-8 编码
-    /// Value: 0 (非 UTF-8) 或 1 (UTF-8)
+    /// Input is UTF-8 encoded.
+    ///
+    /// Value: 0 (not UTF-8) or 1 (UTF-8).
     IUTF8 = 42,
 
     // ========== 本地标志类 (50-62) ==========
-    /// 启用信号字符 (VINTR, VQUIT, VSUSP)
-    /// Value: 0 (禁用) 或 1 (启用)
+    /// Enable the signal characters (VINTR, VQUIT, VSUSP).
+    ///
+    /// Value: 0 (off) or 1 (on).
     ISIG = 50,
 
-    /// 启用规范模式（行缓冲）
-    /// Value: 0 (非规范模式) 或 1 (规范模式)
+    /// Enable canonical mode (line buffering).
+    ///
+    /// Value: 0 (non-canonical mode) or 1 (canonical mode).
     ICANON = 51,
 
-    /// 启用大小写转换
-    /// Value: 0 (不转换) 或 1 (转换)
+    /// Enable case conversion.
+    ///
+    /// Value: 0 (do not convert) or 1 (convert).
     XCASE = 52,
 
-    /// 回显输入字符
-    /// Value: 0 (不回显) 或 1 (回显)
+    /// Echo input characters.
+    ///
+    /// Value: 0 (do not echo) or 1 (echo).
     ECHO = 53,
 
-    /// 回显擦除字符
-    /// Value: 0 (不回显) 或 1 (回显)
+    /// Echo the erase character.
+    ///
+    /// Value: 0 (do not echo) or 1 (echo).
     ECHOE = 54,
 
-    /// 回显 kill 字符
-    /// Value: 0 (不回显) 或 1 (回显)
+    /// Echo the kill character.
+    ///
+    /// Value: 0 (do not echo) or 1 (echo).
     ECHOK = 55,
 
-    /// ECHO 关闭时也回显换行符
-    /// Value: 0 (不回显) 或 1 (回显)
+    /// Echo the newline character even when ECHO is off.
+    ///
+    /// Value: 0 (do not echo) or 1 (echo).
     ECHONL = 56,
 
-    /// 收到信号后不清空输入输出队列
-    /// Value: 0 (清空) 或 1 (不清空)
+    /// Do not flush the input/output queues on receipt of a signal.
+    ///
+    /// Value: 0 (flush) or 1 (do not flush).
     NOFLSH = 57,
 
-    /// 后台进程写入终端时发送 SIGTTOU
-    /// Value: 0 (允许) 或 1 (停止)
+    /// Send `SIGTTOU` when a background process writes to the terminal.
+    ///
+    /// Value: 0 (allow) or 1 (stop).
     TOSTOP = 58,
 
-    /// 启用扩展输入处理
-    /// Value: 0 (禁用) 或 1 (启用)
+    /// Enable extended input processing.
+    ///
+    /// Value: 0 (off) or 1 (on).
     IEXTEN = 59,
 
-    /// 将控制字符回显为 ^X 形式
-    /// Value: 0 (原样) 或 1 (^X 形式)
+    /// Echo control characters in `^X` form.
+    ///
+    /// Value: 0 (as-is) or 1 (as `^X`).
     ECHOCTL = 60,
 
-    /// kill 字符回显行擦除
-    /// Value: 0 (不擦除) 或 1 (擦除)
+    /// The kill character erases the whole echoed line.
+    ///
+    /// Value: 0 (do not erase) or 1 (erase).
     ECHOKE = 61,
 
-    /// 有待重新打印的输入
-    /// Value: 0 (无) 或 1 (有)
+    /// There is input waiting to be reprinted.
+    ///
+    /// Value: 0 (none) or 1 (pending).
     PENDIN = 62,
 
     // ========== 输出标志类 (70-75) ==========
-    /// 启用输出后处理
-    /// Value: 0 (禁用) 或 1 (启用)
+    /// Enable output post-processing.
+    ///
+    /// Value: 0 (off) or 1 (on).
     OPOST = 70,
 
-    /// 将输出的小写转换为大写
-    /// Value: 0 (不转换) 或 1 (转换)
+    /// Map lowercase output characters to uppercase.
+    ///
+    /// Value: 0 (do not convert) or 1 (convert).
     OLCUC = 71,
 
-    /// 将输出的 NL 转换为 CR-NL
-    /// Value: 0 (不转换) 或 1 (转换)
+    /// Map output NL to CR-NL.
+    ///
+    /// Value: 0 (do not convert) or 1 (convert).
     ONLCR = 72,
 
-    /// 将输出的 CR 转换为 NL
-    /// Value: 0 (不转换) 或 1 (转换)
+    /// Map output CR to NL.
+    ///
+    /// Value: 0 (do not convert) or 1 (convert).
     OCRNL = 73,
 
-    /// 在第 0 列不输出 CR
-    /// Value: 0 (输出) 或 1 (不输出)
+    /// Do not output CR at column 0.
+    ///
+    /// Value: 0 (output) or 1 (do not output).
     ONOCR = 74,
 
-    /// NL 同时执行 CR
-    /// Value: 0 (不执行) 或 1 (执行)
+    /// NL also performs the CR function.
+    ///
+    /// Value: 0 (do not perform) or 1 (perform).
     ONLRET = 75,
 
     // ========== 控制标志类 (90-93) ==========
-    /// 使用 7 位数据位
-    /// Value: 0 (不使用) 或 1 (使用)
+    /// Use 7 data bits.
+    ///
+    /// Value: 0 (do not use) or 1 (use).
     CS7 = 90,
 
-    /// 使用 8 位数据位
-    /// Value: 0 (不使用) 或 1 (使用)
+    /// Use 8 data bits.
+    ///
+    /// Value: 0 (do not use) or 1 (use).
     CS8 = 91,
 
-    /// 启用奇偶校验
-    /// Value: 0 (禁用) 或 1 (启用)
+    /// Enable parity.
+    ///
+    /// Value: 0 (off) or 1 (on).
     PARENB = 92,
 
-    /// 奇校验（否则为偶校验）
-    /// Value: 0 (偶校验) 或 1 (奇校验)
+    /// Odd parity instead of even parity.
+    ///
+    /// Value: 0 (even parity) or 1 (odd parity).
     PARODD = 93,
 
     // ========== 波特率类 (128-129) ==========
-    /// 输入波特率
-    /// Value: 波特率数值 (0-230400)
+    /// Input baud rate.
+    ///
+    /// Value: baud rate value (0-230400).
     TtyOpISpeed = 128,
 
-    /// 输出波特率
-    /// Value: 波特率数值 (0-230400)
+    /// Output baud rate.
+    ///
+    /// Value: baud rate value (0-230400).
     TtyOpOSpeed = 129,
 }
 
 impl TtyOpcode {
-    /// 从 u8 值创建 TtyOpcode
+    /// Creates a `TtyOpcode` from its raw `u8` value, or `None` if the value
+    /// is not a known opcode.
     pub fn from_u8(value: u8) -> Option<Self> {
         match value {
             0 => Some(Self::TtyOpEnd),
@@ -353,7 +459,8 @@ impl TtyOpcode {
         }
     }
 
-    /// 获取 Opcode 的名称
+    /// Returns the canonical name of the opcode (e.g. `"VINTR"`,
+    /// `"TTY_OP_END"`).
     pub fn name(&self) -> &'static str {
         match self {
             Self::TtyOpEnd => "TTY_OP_END",
@@ -416,7 +523,7 @@ impl TtyOpcode {
         }
     }
 
-    /// 获取 Opcode 的描述
+    /// Returns a short human-readable (Chinese) description of the opcode.
     pub fn description(&self) -> &'static str {
         match self {
             Self::TtyOpEnd => "结束标记",
@@ -479,37 +586,38 @@ impl TtyOpcode {
         }
     }
 
-    /// 判断是否是特殊字符类型
+    /// Returns `true` if this is a special-character opcode (values 1-18).
     pub fn is_special_char(&self) -> bool {
         (*self as u8) >= 1 && (*self as u8) <= 18
     }
 
-    /// 判断是否是输入标志类型
+    /// Returns `true` if this is an input-flag opcode (values 30-42).
     pub fn is_input_flag(&self) -> bool {
         (*self as u8) >= 30 && (*self as u8) <= 42
     }
 
-    /// 判断是否是本地标志类型
+    /// Returns `true` if this is a local-flag opcode (values 50-62).
     pub fn is_local_flag(&self) -> bool {
         (*self as u8) >= 50 && (*self as u8) <= 62
     }
 
-    /// 判断是否是输出标志类型
+    /// Returns `true` if this is an output-flag opcode (values 70-75).
     pub fn is_output_flag(&self) -> bool {
         (*self as u8) >= 70 && (*self as u8) <= 75
     }
 
-    /// 判断是否是控制标志类型
+    /// Returns `true` if this is a control-flag opcode (values 90-93).
     pub fn is_control_flag(&self) -> bool {
         (*self as u8) >= 90 && (*self as u8) <= 93
     }
 
-    /// 判断是否是波特率类型
+    /// Returns `true` if this is a baud-rate opcode (values 128-129).
     pub fn is_speed(&self) -> bool {
         (*self as u8) >= 128 && (*self as u8) <= 129
     }
 
-    /// 获取 Value 的类型描述
+    /// Returns a human-readable (Chinese) description of the value type
+    /// expected for this opcode.
     pub fn value_type(&self) -> &'static str {
         match self {
             Self::TtyOpEnd => "无",
@@ -524,70 +632,114 @@ impl TtyOpcode {
     }
 }
 
-/// 特殊字符的常用值
+/// Common values of the terminal special characters (the `V*` opcodes), as
+/// ASCII control codes.
 pub mod special_chars {
-    /// Ctrl+C (中断)
+    /// `Ctrl+C` (interrupt).
     pub const CTRL_C: u32 = 3;
-    /// Ctrl+\ (退出)
+    /// `Ctrl+\` (quit).
     pub const CTRL_BACKSLASH: u32 = 28;
-    /// Ctrl+D (文件结束)
+    /// `Ctrl+D` (end of file).
     pub const CTRL_D: u32 = 4;
-    /// Ctrl+U (删除整行)
+    /// `Ctrl+U` (kill the whole line).
     pub const CTRL_U: u32 = 21;
-    /// Ctrl+Z (挂起)
+    /// `Ctrl+Z` (suspend).
     pub const CTRL_Z: u32 = 26;
-    /// Ctrl+Q (恢复输出)
+    /// `Ctrl+Q` (resume output).
     pub const CTRL_Q: u32 = 17;
-    /// Ctrl+S (停止输出)
+    /// `Ctrl+S` (stop output).
     pub const CTRL_S: u32 = 19;
-    /// Ctrl+R (重新打印)
+    /// `Ctrl+R` (reprint the line).
     pub const CTRL_R: u32 = 18;
-    /// Ctrl+W (删除单词)
+    /// `Ctrl+W` (erase a word).
     pub const CTRL_W: u32 = 23;
-    /// Ctrl+V (字面量下一个)
+    /// `Ctrl+V` (literal next character).
     pub const CTRL_V: u32 = 22;
-    /// Ctrl+Y (延迟挂起)
+    /// `Ctrl+Y` (delayed suspend).
     pub const CTRL_Y: u32 = 25;
-    /// Ctrl+T (状态请求)
+    /// `Ctrl+T` (status request).
     pub const CTRL_T: u32 = 20;
-    /// Ctrl+O (丢弃输出)
+    /// `Ctrl+O` (discard output).
     pub const CTRL_O: u32 = 15;
-    /// Backspace (退格)
+    /// `Backspace`.
     pub const BACKSPACE: u32 = 127;
-    /// Ctrl+H (退格备用)
+    /// `Ctrl+H` (alternative backspace).
     pub const CTRL_H: u32 = 8;
-    /// 禁用特殊字符
+    /// The value that disables a special character.
     pub const DISABLED: u32 = 255;
 }
 
-/// 标准波特率值
+/// Standard baud rate values for the [`TtyOpcode::TtyOpISpeed`] and
+/// [`TtyOpcode::TtyOpOSpeed`] terminal modes.
 pub mod baud_rates {
+    /// 0 baud (hang-up).
     pub const B0: u32 = 0;
+    /// 50 baud.
     pub const B50: u32 = 50;
+    /// 75 baud.
     pub const B75: u32 = 75;
+    /// 110 baud.
     pub const B110: u32 = 110;
+    /// 134.5 baud.
     pub const B134: u32 = 134;
+    /// 150 baud.
     pub const B150: u32 = 150;
+    /// 200 baud.
     pub const B200: u32 = 200;
+    /// 300 baud.
     pub const B300: u32 = 300;
+    /// 600 baud.
     pub const B600: u32 = 600;
+    /// 1200 baud.
     pub const B1200: u32 = 1200;
+    /// 1800 baud.
     pub const B1800: u32 = 1800;
+    /// 2400 baud.
     pub const B2400: u32 = 2400;
+    /// 4800 baud.
     pub const B4800: u32 = 4800;
+    /// 9600 baud.
     pub const B9600: u32 = 9600;
+    /// 19200 baud.
     pub const B19200: u32 = 19200;
+    /// 38400 baud.
     pub const B38400: u32 = 38400;
+    /// 57600 baud.
     pub const B57600: u32 = 57600;
+    /// 115200 baud.
     pub const B115200: u32 = 115200;
+    /// 230400 baud.
     pub const B230400: u32 = 230400;
 }
 
-/// Terminal Modes 解析器
+/// Parser and encoder for the terminal modes payload of a `pty-req` channel
+/// request.
 pub struct TtyModesParser;
 
 impl TtyModesParser {
-    /// 解析 terminal modes 数据
+    /// Parses terminal modes from their wire format: a sequence of
+    /// `byte opcode` + `uint32 value` entries (the value in network byte
+    /// order), terminated by opcode 0.
+    ///
+    /// Unknown opcodes are skipped (after printing a warning), and parsing
+    /// also stops at the end of `data` or at an entry whose value is
+    /// truncated.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use flatline::session::channel::{TtyModesParser, TtyOpcode};
+    ///
+    /// let data = [
+    ///     0x01, 0x00, 0x00, 0x00, 0x03, // VINTR = 3
+    ///     0x35, 0x00, 0x00, 0x00, 0x01, // ECHO = 1
+    ///     0x00,                         // TTY_OP_END
+    /// ];
+    /// let modes = TtyModesParser::parse(&data);
+    /// assert_eq!(modes.len(), 2);
+    /// assert_eq!(modes[0], (TtyOpcode::VIntr, 3));
+    /// assert_eq!(modes[1], (TtyOpcode::ECHO, 1));
+    /// ```
     pub fn parse(data: &[u8]) -> Vec<(TtyOpcode, u32)> {
         let mut result = Vec::new();
         let mut i = 0;
@@ -620,7 +772,9 @@ impl TtyModesParser {
         result
     }
 
-    /// 编码 terminal modes 数据
+    /// Encodes terminal modes into their wire format: each entry becomes a
+    /// `byte opcode` followed by a big-endian `uint32 value`, and the result
+    /// is terminated by opcode 0.
     pub fn encode(modes: &[(TtyOpcode, u32)]) -> Vec<u8> {
         let mut result = Vec::new();
 
@@ -636,11 +790,12 @@ impl TtyModesParser {
     }
 }
 
-/// 终端模式预设
+/// Terminal mode presets that can be passed to [`Channel::request_pty`].
 pub mod presets {
     use super::*;
 
-    /// 交互式终端模式
+    /// Interactive terminal mode: echoing and output post-processing enabled,
+    /// with the usual control characters.
     pub fn interactive_terminal() -> Vec<(TtyOpcode, u32)> {
         vec![
             (TtyOpcode::TtyOpOSpeed, 9600),
@@ -667,7 +822,7 @@ pub mod presets {
         ]
     }
 
-    /// 密码输入模式
+    /// Password input mode (echoing disabled).
     pub fn password_input() -> Vec<(TtyOpcode, u32)> {
         vec![
             (TtyOpcode::ISIG, 1),
@@ -679,7 +834,7 @@ pub mod presets {
         ]
     }
 
-    /// 原始模式 (Raw Mode)
+    /// Raw mode (no canonical processing, no echoing, no flow control).
     pub fn raw_mode() -> Vec<(TtyOpcode, u32)> {
         vec![
             (TtyOpcode::ISIG, 0),   // 禁用信号
@@ -692,7 +847,7 @@ pub mod presets {
         ]
     }
 
-    /// 串口通信模式
+    /// Serial communication mode (9600 baud, 8 data bits, even parity).
     pub fn serial_communication() -> Vec<(TtyOpcode, u32)> {
         vec![
             (TtyOpcode::TtyOpOSpeed, 9600),
@@ -704,9 +859,15 @@ pub mod presets {
     }
 }
 
+/// The local and remote channel numbers that identify a channel on the wire.
+///
+/// Each side picks its own number for a channel, so both numbers are needed
+/// to address it in SSH messages.
 #[derive(Clone, Copy, Hash, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
 pub struct IdentityPair {
+    /// The channel number assigned by this client (the local number).
     pub client: u32,
+    /// The channel number assigned by the server (the remote number).
     pub server: u32,
 }
 
@@ -716,6 +877,17 @@ impl IdentityPair {
     }
 }
 
+/// A handle to an SSH connection-layer channel.
+///
+/// Obtain one from
+/// [`Session::channel_open_default`](crate::session::Session::channel_open_default)
+/// or [`Session::channel_open`](crate::session::Session::channel_open).
+/// Outgoing data is written with [`Channel::send`] and incoming data arrives
+/// as [`Message`]s read with [`Channel::receive`] or [`Channel::try_receive`].
+///
+/// Dropping the handle closes the channel (best effort); use [`Channel::close`]
+/// to wait until the close has been carried out, or [`Channel::eof`] to only
+/// signal that no more data will be sent.
 #[derive(derive_more::Debug)]
 pub struct Channel {
     id: IdentityPair,
@@ -772,10 +944,16 @@ impl Channel {
         }
     }
 
+    /// Returns the local and remote channel numbers of this channel.
     pub fn identity(&self) -> IdentityPair {
         self.id
     }
 
+    /// Signals that this side will send no more data (`SSH_MSG_CHANNEL_EOF`).
+    ///
+    /// The channel stays open: this peer may still send data, and this side
+    /// may still read it. Returns an error if the channel is unknown or the
+    /// session is shutting down.
     pub async fn eof(&self) -> error::Result<()> {
         let (sender, receiver) = oneshot::channel();
         let event = Event::ChannelEof {
@@ -788,6 +966,11 @@ impl Channel {
         receiver.receive_next().await?
     }
 
+    /// Closes the channel (`SSH_MSG_CHANNEL_CLOSE`), consuming the handle.
+    ///
+    /// Closing is final; use [`Channel::eof`] to only signal that no more
+    /// data will be sent. Returns an error if the channel is unknown or the
+    /// session is shutting down.
     pub async fn close(mut self) -> error::Result<()> {
         let (sender, receiver) = oneshot::channel();
         let event = Event::ChannelClose {
@@ -802,6 +985,10 @@ impl Channel {
         receiver.receive_next().await?
     }
 
+    /// Returns the next message without blocking.
+    ///
+    /// Yields `Ok(None)` when no message is pending, and an error when the
+    /// session has shut down.
     pub fn try_receive(&mut self) -> error::Result<Option<Message>> {
         match self.receiver.try_recv() {
             Ok(v) => Ok(Some(v)),
@@ -814,6 +1001,9 @@ impl Channel {
         }
     }
 
+    /// Waits for and returns the next message from the server.
+    ///
+    /// Returns an error when the session has shut down.
     pub async fn receive(&mut self) -> error::Result<Message> {
         let msg = self
             .receiver
@@ -825,6 +1015,14 @@ impl Channel {
         Ok(msg)
     }
 
+    /// Sends `data` on the channel, returning how many bytes were accepted.
+    ///
+    /// How much can be written in one call is limited by the peer's receive
+    /// window and maximum packet size, so the returned count may be smaller
+    /// than `data.len()`; callers must handle this partial write by sending
+    /// the remaining bytes again. Empty input returns `Ok(0)` without sending
+    /// anything. Returns an error if the channel is unknown or the session is
+    /// shutting down.
     pub async fn send(&self, data: impl Into<Vec<u8>>) -> error::Result<usize> {
         let data = data.into();
         if data.is_empty() {
@@ -841,6 +1039,16 @@ impl Channel {
         Ok(size)
     }
 
+    /// Sends an `x11-req` channel request, asking the server to forward X11
+    /// connections from the remote display to this client.
+    ///
+    /// `want_reply` indicates whether the peer should answer the channel
+    /// request; when `true`, the call waits for `SSH_MSG_CHANNEL_SUCCESS` or
+    /// `SSH_MSG_CHANNEL_FAILURE` and returns an error for the latter (and if
+    /// the channel is closed while waiting). `single_connection` asks that
+    /// only one connection be forwarded, `protocol` names the authorisation
+    /// protocol (e.g. `"MIT-MAGIC-COOKIE-1"`), `cookie` carries its cookie,
+    /// and `screen` selects the screen on the remote display.
     pub async fn request_x11(
         &mut self,
         want_reply: bool,
@@ -865,6 +1073,14 @@ impl Channel {
         receiver.receive_next().await?
     }
 
+    /// Sends an `env` channel request, setting the environment variable
+    /// `name` to `value` for the shell or command started on this channel.
+    ///
+    /// `want_reply` indicates whether the peer should answer the channel
+    /// request; when `true`, the call waits for `SSH_MSG_CHANNEL_SUCCESS` or
+    /// `SSH_MSG_CHANNEL_FAILURE` and returns an error for the latter (and if
+    /// the channel is closed while waiting). Servers are free to ignore `env`
+    /// requests.
     pub async fn request_env(
         &mut self,
         want_reply: bool,
@@ -885,6 +1101,14 @@ impl Channel {
         receiver.receive_next().await?
     }
 
+    /// Sends a `signal` channel request, asking the server to deliver
+    /// `signal` (a name such as `"TERM"` or `"INT"`, without the `SIG`
+    /// prefix) to the process running on this channel.
+    ///
+    /// `want_reply` indicates whether the peer should answer the channel
+    /// request; when `true`, the call waits for `SSH_MSG_CHANNEL_SUCCESS` or
+    /// `SSH_MSG_CHANNEL_FAILURE` and returns an error for the latter (and if
+    /// the channel is closed while waiting).
     pub async fn request_signal(&self, want_reply: bool, signal: Signal) -> error::Result<()> {
         let (sender, receiver) = oneshot::channel();
         let event = Event::ChannelRequestSignal {
@@ -899,6 +1123,11 @@ impl Channel {
         receiver.receive_next().await?
     }
 
+    /// Sends a `window-change` channel request reporting a new terminal size.
+    ///
+    /// `columns` and `rows` are the size in characters, `width` and `height`
+    /// the size in pixels. RFC 4254 specifies `want_reply = FALSE` for this
+    /// request, so no reply is awaited and only transport errors surface.
     pub async fn request_window_change(
         &self,
         columns: u32,
@@ -921,6 +1150,14 @@ impl Channel {
         receiver.receive_next().await?
     }
 
+    /// Sends an `exec` channel request asking the server to run `command`.
+    ///
+    /// `want_reply` indicates whether the peer should answer the channel
+    /// request; when `true`, the call waits for `SSH_MSG_CHANNEL_SUCCESS` or
+    /// `SSH_MSG_CHANNEL_FAILURE` and returns an error for the latter (and if
+    /// the channel is closed while waiting). The command's output then
+    /// arrives as [`Message::Stdout`] and [`Message::Stderr`] messages,
+    /// usually followed by [`Message::Exit`].
     pub async fn request_exec(
         &self,
         want_reply: bool,
@@ -939,6 +1176,13 @@ impl Channel {
         receiver.receive_next().await?
     }
 
+    /// Sends a `shell` channel request asking the server to start an
+    /// interactive shell on this channel.
+    ///
+    /// `want_reply` indicates whether the peer should answer the channel
+    /// request; when `true`, the call waits for `SSH_MSG_CHANNEL_SUCCESS` or
+    /// `SSH_MSG_CHANNEL_FAILURE` and returns an error for the latter (and if
+    /// the channel is closed while waiting).
     pub async fn request_shell(&self, want_reply: bool) -> error::Result<()> {
         let (sender, receiver) = oneshot::channel();
         let event = Event::ChannelRequestShell {
@@ -952,6 +1196,13 @@ impl Channel {
         receiver.receive_next().await?
     }
 
+    /// Sends an `agent-req` channel request, asking the server to forward an
+    /// ssh-agent connection to this client (an OpenSSH extension).
+    ///
+    /// `want_reply` indicates whether the peer should answer the channel
+    /// request; when `true`, the call waits for `SSH_MSG_CHANNEL_SUCCESS` or
+    /// `SSH_MSG_CHANNEL_FAILURE` and returns an error for the latter (and if
+    /// the channel is closed while waiting).
     pub async fn request_agent(&self, want_reply: bool) -> error::Result<()> {
         let (sender, receiver) = oneshot::channel();
         let event = Event::ChannelRequestAgent {
@@ -965,6 +1216,14 @@ impl Channel {
         receiver.receive_next().await?
     }
 
+    /// Sends a `break` channel request asking the server to signal a break
+    /// to the remote application, for at most `milliseconds` (0 means "as
+    /// long as possible").
+    ///
+    /// `want_reply` indicates whether the peer should answer the channel
+    /// request; when `true`, the call waits for `SSH_MSG_CHANNEL_SUCCESS` or
+    /// `SSH_MSG_CHANNEL_FAILURE` and returns an error for the latter (and if
+    /// the channel is closed while waiting).
     pub async fn request_break(&self, want_reply: bool, milliseconds: u32) -> error::Result<()> {
         let (sender, receiver) = oneshot::channel();
         let event = Event::ChannelRequestBreak {
@@ -977,6 +1236,17 @@ impl Channel {
         receiver.receive_next().await?
     }
 
+    /// Sends a `pty-req` channel request, asking the server to allocate a
+    /// pseudo-terminal for this channel.
+    ///
+    /// `terminal` is the TERM value (e.g. `"xterm-256color"`), `columns` and
+    /// `rows` the window size in characters, `width` and `height` in pixels,
+    /// and `modes` the initial terminal modes (RFC 4254 §8), encoded as
+    /// opcode/value pairs terminated by [`TtyOpcode::TtyOpEnd`].
+    /// `want_reply` indicates whether the peer should answer the channel
+    /// request; when `true`, the call waits for `SSH_MSG_CHANNEL_SUCCESS` or
+    /// `SSH_MSG_CHANNEL_FAILURE` and returns an error for the latter (and if
+    /// the channel is closed while waiting).
     pub async fn request_pty(
         &self,
         terminal: impl Into<String>,
@@ -1007,6 +1277,12 @@ impl Channel {
     }
 }
 
+/// A buffering adapter around a [`Channel`].
+///
+/// It batches outgoing writes in an internal buffer (taking care of the
+/// partial writes of [`Channel::send`]) and accumulates incoming stdout data
+/// in an internal read buffer, so callers can work with lines and fixed-size
+/// chunks without tracking the channel's state themselves.
 #[derive(derive_more::Debug)]
 pub struct BufferChannel {
     channel: channel::Channel,
@@ -1017,6 +1293,7 @@ pub struct BufferChannel {
 }
 
 impl BufferChannel {
+    /// Wraps the given [`Channel`] with empty read and write buffers.
     pub fn new(channel: channel::Channel) -> Self {
         Self {
             channel,
@@ -1025,10 +1302,19 @@ impl BufferChannel {
         }
     }
 
+    /// Returns a mutable reference to the wrapped [`Channel`], e.g. to send
+    /// channel requests or read messages directly.
     pub fn channel_mut(&mut self) -> &mut channel::Channel {
         &mut self.channel
     }
 
+    /// Sends the write buffer until it is fully drained.
+    ///
+    /// While the peer's window prevents a full write, incoming messages are
+    /// read to make progress (stdout data is appended to the read buffer);
+    /// this may therefore block. Returns `Ok(())` immediately when the write
+    /// buffer is already empty, and an error on transport failures or an
+    /// unexpected [`Message::Close`].
     pub async fn flush(&mut self) -> error::Result<()> {
         if self.write_buf.is_empty() {
             return Ok(());
@@ -1075,6 +1361,11 @@ impl BufferChannel {
         Ok(())
     }
 
+    /// Queues `data` for sending, forwarding it to the channel right away
+    /// when possible.
+    ///
+    /// Bytes the peer's window could not accept remain in the write buffer
+    /// and go out on the next [`BufferChannel::flush`] (or `send`).
     pub async fn send(&mut self, data: &[u8]) -> error::Result<()> {
         if self.write_buf.is_empty() {
             let size = self.channel.send(data).await?;
@@ -1092,6 +1383,11 @@ impl BufferChannel {
         Ok(())
     }
 
+    /// Drops the first `len` bytes of the read buffer, marking them as
+    /// consumed.
+    ///
+    /// Does nothing when `len` is `0` or the read buffer is empty; otherwise
+    /// panics if the buffer holds fewer than `len` bytes.
     pub fn consumer_read_buffer(&mut self, len: usize) {
         if len == 0 || self.read_buf.is_empty() {
             return;
@@ -1102,6 +1398,11 @@ impl BufferChannel {
         self.read_buf.advance(len);
     }
 
+    /// Waits until new stdout data has arrived and appends it to the read
+    /// buffer.
+    ///
+    /// Other messages are skipped (and logged), while [`Message::Close`] and
+    /// [`Message::Eof`] are reported as errors, as are transport failures.
     pub async fn fill_once(&mut self) -> error::Result<()> {
         loop {
             let msg = self.channel.receive().await?;
@@ -1140,6 +1441,11 @@ impl BufferChannel {
         }
     }
 
+    /// Waits until the read buffer holds any data and returns it, without
+    /// consuming it.
+    ///
+    /// Propagates errors from [`BufferChannel::fill_once`], e.g. when the
+    /// channel closes or reaches EOF before data arrives.
     pub async fn fill(&mut self) -> error::Result<&[u8]> {
         while self.read_buf.is_empty() {
             self.fill_once().await?;
@@ -1147,6 +1453,11 @@ impl BufferChannel {
         Ok(&self.read_buf[..])
     }
 
+    /// Waits until the read buffer holds at least `len` bytes and returns
+    /// the first `len` of them, without consuming them.
+    ///
+    /// Propagates errors from [`BufferChannel::fill_once`], e.g. when the
+    /// channel closes or reaches EOF before enough data arrives.
     pub async fn fill_exact(&mut self, len: usize) -> error::Result<&[u8]> {
         while self.read_buf.len() < len {
             self.fill_once().await?;
@@ -1155,6 +1466,11 @@ impl BufferChannel {
         Ok(&self.read_buf[..len])
     }
 
+    /// Waits until the read buffer contains a `\n` and returns everything up
+    /// to and including it, without consuming it.
+    ///
+    /// Propagates errors from [`BufferChannel::fill_once`], e.g. when the
+    /// channel closes or reaches EOF before a newline arrives.
     pub async fn read_line_lf(&mut self) -> error::Result<&[u8]> {
         let mut pos = 0;
         loop {
@@ -1168,6 +1484,10 @@ impl BufferChannel {
         }
     }
 
+    /// Closes the underlying channel, consuming this handle.
+    ///
+    /// Data still sitting in the write buffer is not sent. Returns an error
+    /// if the channel is unknown or the session is shutting down.
     pub async fn close(self) -> error::Result<()> {
         self.channel.close().await
     }

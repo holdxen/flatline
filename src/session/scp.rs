@@ -1,24 +1,72 @@
+//! The legacy SCP file transfer protocol.
+//!
+//! SCP runs the remote side's `scp` binary over an exec channel
+//! (`scp -f` to fetch, `scp -t` to send) and speaks the small control
+//! protocol built from single-byte acknowledgements and `C`/`D`/`E`/`T`
+//! records. Wrap a channel in a [`Handle`], then drive the exchange with
+//! [`Handle::start_receiving`] or [`Handle::start_sending`].
+//!
+//! ```rust,no_run
+//! # async fn run(session: &flatline::session::Session) -> anyhow::Result<()> {
+//! use flatline::scp::Handle;
+//!
+//! let channel = session.channel_open_default().await?;
+//! let mut scp = Handle::new(channel);
+//!
+//! scp.start_sending("/tmp/", false).await?;
+//! let mut file = scp.start_sending_file(0o644, 5, "hello.txt").await?;
+//! file.send(b"hello").await?;
+//! file.finish().await?;
+//! scp.close().await?;
+//! # Ok(())
+//! # }
+//! ```
+
 use super::channel::{self, BufferChannel};
 use crate::error;
 use regex::Regex;
 use snafu::{OptionExt, ResultExt};
 use std::str::Utf8Error;
 
+/// Errors reported by the SCP control protocol.
 #[derive(Debug, snafu::Snafu)]
 pub enum Error {
+    /// The remote side sent a non-fatal warning (response code `1`).
     #[snafu(display("secure copy protocol failure: {}", msg))]
-    Failure { msg: String },
+    Failure {
+        /// The message the remote side reported.
+        msg: String,
+    },
+    /// The remote side sent a fatal error (response code `2`).
     #[snafu(display("secure copy protocol critical: {}", msg))]
-    Critical { msg: String },
+    Critical {
+        /// The message the remote side reported.
+        msg: String,
+    },
+    /// A response did not match what the protocol requires at this point.
     #[snafu(display("secure copy protocol: {}", detail))]
-    UnexpectedResponse { detail: String },
+    UnexpectedResponse {
+        /// Description of what was received instead.
+        detail: String,
+    },
+    /// An error message from the peer was not valid UTF-8.
     #[snafu(display("Unexpected error message: {}", source))]
-    UnexpectedErrorMessage { source: Utf8Error },
+    UnexpectedErrorMessage {
+        /// The UTF-8 decoding error.
+        source: Utf8Error,
+    },
+    /// A path could not be shell-quoted, so it was not sent to the server.
     #[snafu(display("Invalid target name: {}", source))]
-    InvalidTargetName { source: shlex::QuoteError },
+    InvalidTargetName {
+        /// The shell-quoting error.
+        source: shlex::QuoteError,
+    },
 }
 
 impl Error {
+    /// Returns `true` for errors the remote side reported ([`Error::Failure`]
+    /// and [`Error::Critical`]), i.e. a failure the server knows about, as
+    /// opposed to a locally detected protocol violation.
     pub fn is_broken(&self) -> bool {
         matches!(self, Error::Failure { .. } | Error::Critical { .. })
     }
@@ -31,6 +79,12 @@ impl From<Error> for error::Error {
     }
 }
 
+/// Receives a single file announced by the remote `scp -f` process.
+///
+/// Created by [`Handle::start_receiving`] after the peer's `C` record has
+/// been parsed. Read chunks with [`receive`](Self::receive) until
+/// [`is_finished`](Self::is_finished) returns `true`; the final chunk has the
+/// trailing NUL byte stripped and an acknowledgement is sent back to the peer.
 #[derive(Debug)]
 pub struct FileReceiver<'a> {
     stream: &'a mut Handle,
@@ -51,19 +105,36 @@ impl<'a> FileReceiver<'a> {
         }
     }
 
+    /// Returns the file name as announced in the peer's `C` record.
     pub fn file_name(&self) -> &str {
         &self.file_name
     }
 
+    /// Returns the file mode (permission bits) from the `C` record,
+    /// e.g. `0o644`.
     pub fn mode(&self) -> u16 {
         self.mode
     }
 
+    /// Returns `true` once the whole file (plus its trailing NUL byte) has
+    /// been read.
     pub fn is_finished(&self) -> bool {
         debug_assert!(self.received <= self.size + 1);
         self.received == self.size + 1
     }
 
+    /// Reads the next chunk of file data.
+    ///
+    /// Returns an empty vector once the file is finished. On the final chunk
+    /// this also sends the completion acknowledgement to the peer, so the
+    /// caller should stop as soon as [`is_finished`](Self::is_finished) is
+    /// `true`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::UnexpectedResponse`] if the
+    /// peer sends more data than the announced file size, or if the trailing
+    /// NUL byte is missing.
     pub async fn receive(&mut self) -> error::Result<Vec<u8>> {
         let mut data = self.stream.receive().await?;
         self.received += data.len() as u64;
@@ -94,6 +165,11 @@ impl<'a> FileReceiver<'a> {
     }
 }
 
+/// Sends a single file to the remote `scp -t` process.
+///
+/// Created by [`Handle::start_sending_file`]. Write the file contents with
+/// [`send`](Self::send), then call [`finish`](Self::finish) exactly once to
+/// write the terminating NUL byte and wait for the peer's acknowledgement.
 #[derive(Debug)]
 pub struct FileSender<'a> {
     stream: &'a mut Handle,
@@ -103,9 +179,17 @@ impl<'a> FileSender<'a> {
     fn new(stream: &'a mut Handle) -> Self {
         Self { stream }
     }
+
+    /// Writes the next chunk of file data to the peer.
     pub async fn send(&mut self, data: &[u8]) -> error::Result<()> {
         self.stream.send(data).await
     }
+
+    /// Completes the transfer: sends the terminating NUL byte and waits for
+    /// the peer to acknowledge the file.
+    ///
+    /// The file size announced in [`Handle::start_sending_file`] must match
+    /// the total number of bytes passed to [`send`](Self::send).
     pub async fn finish(&mut self) -> error::Result<()> {
         self.stream.send(&[0]).await?;
         self.stream.flush().await?;
@@ -116,6 +200,15 @@ impl<'a> FileSender<'a> {
     }
 }
 
+/// A channel speaking the legacy SCP control protocol.
+///
+/// One `Handle` drives one `scp` invocation: call [`start_receiving`] to fetch
+/// a file or [`start_sending`] to upload, then [`close`] the channel when
+/// done.
+///
+/// [`start_receiving`]: Self::start_receiving
+/// [`start_sending`]: Self::start_sending
+/// [`close`]: Self::close
 #[derive(derive_more::Debug)]
 pub struct Handle {
     #[debug(skip)]
@@ -131,6 +224,7 @@ impl Handle {
         self.channel.send(data).await
     }
 
+    /// Sends EOF and closes the underlying channel.
     pub async fn close(self) -> error::Result<()> {
         self.channel.close().await
     }
@@ -143,6 +237,18 @@ impl Handle {
         Ok(data)
     }
 
+    /// Starts fetching `target` from the remote host.
+    ///
+    /// Executes `scp -f <target>` on the remote side, performs the initial
+    /// handshake and parses the peer's `C` record, returning a
+    /// [`FileReceiver`] for reading the announced file. `target` is
+    /// shell-quoted before being embedded in the command.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::UnexpectedResponse`] if the peer's `C` record does
+    /// not match the expected `C<mode> <size> <name>` format, or
+    /// [`Error::InvalidTargetName`] if `target` cannot be shell-quoted.
     pub async fn start_receiving(&mut self, target: &str) -> error::Result<FileReceiver<'_>> {
         let target = shlex::try_quote(target)
             .context(InvalidTargetNameSnafu)?
@@ -190,6 +296,17 @@ impl Handle {
         Ok(FileReceiver::new(self, mode, size, filename))
     }
 
+    /// Starts uploading to `target` on the remote host.
+    ///
+    /// Executes `scp -t <target>` (with `-r` when `recursive` is set) and
+    /// waits for the peer's initial acknowledgement. Follow up with
+    /// [`enter`], [`set_timestamp`] and [`start_sending_file`] to build the
+    /// transfer, then [`close`].
+    ///
+    /// [`enter`]: Self::enter
+    /// [`set_timestamp`]: Self::set_timestamp
+    /// [`start_sending_file`]: Self::start_sending_file
+    /// [`close`]: Self::close
     pub async fn start_sending(&mut self, target: &str, recursive: bool) -> error::Result<()> {
         let target = shlex::try_quote(target)
             .context(InvalidTargetNameSnafu)?
@@ -247,6 +364,11 @@ impl Handle {
         }
     }
 
+    /// Sends a `T` record setting the modification and access timestamps for
+    /// the next file, and waits for the peer's acknowledgement.
+    ///
+    /// Times are split into whole seconds and microseconds; a zero
+    /// `*usec` field is sent as-is.
     pub async fn set_timestamp(
         &mut self,
         mtime_sec: u64,
@@ -265,6 +387,19 @@ impl Handle {
         Ok(())
     }
 
+    /// Announces a file with a `C` record and waits for the peer's
+    /// acknowledgement.
+    ///
+    /// `permission` is the file mode (e.g. `0o644`), `size` the exact number
+    /// of bytes that will follow, and `file_name` is shell-quoted before use.
+    /// The returned [`FileSender`] borrows the handle mutably, so
+    /// [`finish`](FileSender::finish) it before issuing further commands.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidTargetName`] if `file_name` cannot be
+    /// shell-quoted, or [`Error::Failure`]/[`Error::Critical`] if the peer
+    /// rejects the file.
     pub async fn start_sending_file(
         &mut self,
         permission: u16,
@@ -283,6 +418,12 @@ impl Handle {
         Ok(FileSender::new(self))
     }
 
+    /// Sends a `D` record to enter a directory (create it on the receiving
+    /// side) and waits for the peer's acknowledgement.
+    ///
+    /// Match every `enter` with a corresponding [`exit`] before closing.
+    ///
+    /// [`exit`]: Self::exit
     pub async fn enter(&mut self, permission: u16, target: &str) -> error::Result<()> {
         let target = shlex::try_quote(target)
             .context(InvalidTargetNameSnafu)?
@@ -296,6 +437,10 @@ impl Handle {
         Ok(())
     }
 
+    /// Sends an `E` record to leave the directory entered by [`enter`] and
+    /// waits for the peer's acknowledgement.
+    ///
+    /// [`enter`]: Self::enter
     pub async fn exit(&mut self) -> error::Result<()> {
         self.channel.send("E\n".as_bytes()).await?;
         self.channel.flush().await?;
@@ -303,6 +448,10 @@ impl Handle {
         Ok(())
     }
 
+    /// Wraps a freshly opened channel in a [`Handle`].
+    ///
+    /// The channel must not have any command executed on it yet: the first
+    /// thing the handle does is `exec` the remote `scp` process.
     pub fn new(channel: channel::Channel) -> Self {
         Self {
             channel: BufferChannel::new(channel),

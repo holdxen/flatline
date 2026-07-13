@@ -1,3 +1,9 @@
+//! Public-key signatures for SSH (RFC 4251, section 5; RFC 4253, section 6.6).
+//!
+//! [`Signature`] signs data with a private key, which the client uses for
+//! publickey user authentication, while [`Verify`] checks signatures, which
+//! the key exchange uses to authenticate the server's host key.
+
 use indexmap::IndexMap;
 use openssl::{
     bn::{BigNum, BigNumContext},
@@ -26,6 +32,7 @@ use crate::{
 use super::*;
 
 algo_list!(
+    "public-key signature algorithm",
     signature_all,
     new_signature_all,
     new_signature_by_name,
@@ -41,6 +48,7 @@ algo_list!(
 );
 
 algo_list!(
+    "host-key verification algorithm",
     verify_all,
     new_verify_all,
     new_verify_by_name,
@@ -55,9 +63,27 @@ algo_list!(
     "ecdsa-sha2-nistp384" => Ecdsa::ecdsa_sha2_nistp384(),
 );
 
+/// Signs data with a private key, as required by SSH public-key
+/// authentication (RFC 4252).
+///
+/// One instance holds one private key: load it with `initialize`, then call
+/// `signature` for each message to be signed.
 pub trait Signature {
+    /// Returns the SSH signature algorithm name (`ssh-ed25519`,
+    /// `rsa-sha2-256`, ...) as it appears in `SSH_MSG_KEXINIT` and in
+    /// signature blobs.
     fn name(&self) -> &str;
+    /// Loads the private key from its SSH wire-format blob (RFC 4251,
+    /// section 5); must be called before `signature`.
+    ///
+    /// Fails with an `Error::MismatchKey` error if the blob's key type does
+    /// not match this algorithm.
     fn initialize(&mut self, key: &[u8]) -> Result<()>;
+    /// Signs `data` and returns the raw signature bytes.
+    ///
+    /// The caller wraps the result in an SSH signature blob (algorithm name
+    /// plus signature) when placing it in a message. Fails if `initialize`
+    /// has not been called or the key cannot be used.
     fn signature(&mut self, data: &[u8]) -> Result<Vec<u8>>;
 }
 
@@ -116,9 +142,28 @@ impl Signature for Ed25519 {
     }
 }
 
+/// Verifies SSH signatures with a public key.
+///
+/// One instance holds one public key: load it with `initialize`, then call
+/// `verify` for each signature to be checked. The handshake uses this to
+/// authenticate the server's host key against the exchange hash.
 pub trait Verify {
+    /// Returns the SSH signature algorithm name (`ssh-ed25519`,
+    /// `rsa-sha2-256`, ...) this verifier accepts.
     fn name(&self) -> &str;
+    /// Loads the public key from its SSH wire-format blob (RFC 4251,
+    /// section 5); must be called before `verify`.
+    ///
+    /// Fails with an `Error::MismatchKey` error if the blob's key type does
+    /// not match this algorithm.
     fn initialize(&mut self, key: &[u8]) -> Result<()>;
+    /// Checks `signature` over `data` and returns whether it verifies.
+    ///
+    /// `signature` is a complete SSH signature blob as it appears on the wire
+    /// (algorithm name plus signature). Only `Ok(true)` means the signature
+    /// is valid; an invalid signature or a malformed blob may instead yield
+    /// `Ok(false)` or an `Err`, depending on the algorithm, so callers should
+    /// accept the signature only on `Ok(true)`.
     fn verify(&mut self, signature: &[u8], data: &[u8]) -> Result<bool>;
 }
 

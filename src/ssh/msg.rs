@@ -1,3 +1,11 @@
+//! SSH protocol message values shared by the transport and connection layers.
+//!
+//! This module exposes the [`ChannelOpenFailureReason`], [`DisconnectReason`]
+//! and [`Signal`] newtypes together with their protocol constants (RFC 4250,
+//! RFC 4253 and RFC 4254). Helpers for parsing binary packets and decoded SSH
+//! messages also live here, but they are crate-internal and not part of the
+//! public API.
+
 use std::collections::HashMap;
 
 use super::*;
@@ -6,49 +14,79 @@ use crate::ssh::buffer::Consumer;
 use protocol::*;
 use snafu::ResultExt;
 
+/// A reason code for an `SSH_MSG_CHANNEL_OPEN_FAILURE` message (RFC 4254, section 5.1).
 #[repr(transparent)]
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub struct ChannelOpenFailureReason(pub u32);
 
 impl ChannelOpenFailureReason {
+    /// Opening the channel is administratively prohibited.
     pub const ADMINISTRATIVELY_PROHIBITED: Self = Self(SSH_OPEN_ADMINISTRATIVELY_PROHIBITED);
+    /// The connection to the requested destination failed.
     pub const CONNECT_FAILED: Self = Self(SSH_OPEN_CONNECT_FAILED);
+    /// The requested channel type is unknown or unsupported.
     pub const UNKNOWN_CHANNEL_TYPE: Self = Self(SSH_OPEN_UNKNOWN_CHANNEL_TYPE);
+    /// The peer is short on resources, such as channels or memory.
     pub const RESOURCE_SHORTAGE: Self = Self(SSH_OPEN_RESOURCE_SHORTAGE);
 }
 
+/// A reason code for an `SSH_MSG_DISCONNECT` message (RFC 4253, section 11.1).
 #[repr(transparent)]
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub struct DisconnectReason(pub u32);
 impl DisconnectReason {
+    /// The host does not allow this client to connect.
     pub const HOST_NOT_ALLOWED_TO_CONNECT: Self = Self(SSH_DISCONNECT_HOST_NOT_ALLOWED_TO_CONNECT);
+    /// A protocol error occurred.
     pub const PROTOCOL_ERROR: Self = Self(SSH_DISCONNECT_PROTOCOL_ERROR);
+    /// Key exchange failed.
     pub const KEY_EXCHANGE_FAILED: Self = Self(SSH_DISCONNECT_KEY_EXCHANGE_FAILED);
+    /// Reserved; not to be used by implementations.
     pub const RESERVED: Self = Self(SSH_DISCONNECT_RESERVED);
+    /// A message authentication code (MAC) error occurred.
     pub const MAC_ERROR: Self = Self(SSH_DISCONNECT_MAC_ERROR);
+    /// A compression error occurred.
     pub const COMPRESSION_ERROR: Self = Self(SSH_DISCONNECT_COMPRESSION_ERROR);
+    /// The requested service is not available.
     pub const SERVICE_NOT_AVAILABLE: Self = Self(SSH_DISCONNECT_SERVICE_NOT_AVAILABLE);
+    /// The protocol version is not supported by the remote peer.
     pub const PROTOCOL_VERSION_NOT_SUPPORTED: Self =
         Self(SSH_DISCONNECT_PROTOCOL_VERSION_NOT_SUPPORTED);
+    /// The server's host key could not be verified.
     pub const HOST_KEY_NOT_VERIFIABLE: Self = Self(SSH_DISCONNECT_HOST_KEY_NOT_VERIFIABLE);
+    /// The connection was lost.
     pub const CONNECTION_LOST: Self = Self(SSH_DISCONNECT_CONNECTION_LOST);
+    /// The application at the other end of the connection disconnected.
     pub const BY_APPLICATION: Self = Self(SSH_DISCONNECT_BY_APPLICATION);
+    /// Too many connections are already open.
     pub const TOO_MANY_CONNECTIONS: Self = Self(SSH_DISCONNECT_TOO_MANY_CONNECTIONS);
+    /// Authentication was cancelled by the user.
     pub const AUTH_CANCELLED_BY_USER: Self = Self(SSH_DISCONNECT_AUTH_CANCELLED_BY_USER);
+    /// No more authentication methods are available.
     pub const NO_MORE_AUTH_METHODS_AVAILABLE: Self =
         Self(SSH_DISCONNECT_NO_MORE_AUTH_METHODS_AVAILABLE);
+    /// The supplied user name is illegal.
     pub const ILLEGAL_USER_NAME: Self = Self(SSH_DISCONNECT_ILLEGAL_USER_NAME);
 }
 
+/// A signal name for the `signal` and `exit-signal` channel requests (RFC 4254, sections 6.9 and 6.10).
+///
+/// The wrapped string is the bare signal name without the `SIG` prefix.
+/// [`Display`](std::fmt::Display) prints the wrapped name, and the
+/// `PartialEq<&str>` implementation allows comparing a `Signal` directly with a
+/// string slice such as `Signal::ABRT`. The associated constants are plain
+/// `&'static str` values rather than `Signal`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Signal(pub String);
 
+/// Writes the wrapped signal name.
 impl std::fmt::Display for Signal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         std::fmt::Display::fmt(&self.0, f)
     }
 }
 
+/// Compares the wrapped signal name with a string slice.
 impl PartialEq<&str> for Signal {
     fn eq(&self, other: &&str) -> bool {
         self.0 == *other
@@ -56,17 +94,29 @@ impl PartialEq<&str> for Signal {
 }
 
 impl Signal {
+    /// The abort signal (`SIGABRT`).
     pub const ABRT: &'static str = "ABRT";
+    /// The floating-point exception signal (`SIGFPE`).
     pub const FPE: &'static str = "FPE";
+    /// The hangup signal (`SIGHUP`).
     pub const HUP: &'static str = "HUP";
+    /// The illegal instruction signal (`SIGILL`).
     pub const ILL: &'static str = "ILL";
+    /// The interrupt signal (`SIGINT`).
     pub const INT: &'static str = "INT";
+    /// The kill signal (`SIGKILL`), which cannot be caught or ignored.
     pub const KILL: &'static str = "KILL";
+    /// The broken pipe signal (`SIGPIPE`).
     pub const PIPE: &'static str = "PIPE";
+    /// The quit signal (`SIGQUIT`).
     pub const QUIT: &'static str = "QUIT";
+    /// The segmentation fault signal (`SIGSEGV`).
     pub const SEGV: &'static str = "SEGV";
+    /// The termination signal (`SIGTERM`).
     pub const TERM: &'static str = "TERM";
+    /// User-defined signal 1 (`SIGUSR1`).
     pub const USR1: &'static str = "USR1";
+    /// User-defined signal 2 (`SIGUSR2`).
     pub const USR2: &'static str = "USR2";
 }
 

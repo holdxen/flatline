@@ -1,3 +1,24 @@
+//! Parsing for SSH private and public key files.
+//!
+//! Supported formats:
+//!
+//! * OpenSSH `openssh-key-v1` private keys (the
+//!   `-----BEGIN OPENSSH PRIVATE KEY-----` format), including keys encrypted
+//!   with a passphrase (the `bcrypt` KDF plus any cipher this crate can
+//!   decrypt);
+//! * PEM private keys via OpenSSL, for RSA, EC and Ed25519 keys (optionally
+//!   passphrase-encrypted);
+//! * `authorized_keys`-style public key text (`type base64-blob [comment]`);
+//! * `---- BEGIN SSH2 PUBLIC KEY ----` blocks with a `Comment:` line;
+//! * OpenSSH certificates, i.e. public keys whose type name ends with
+//!   [`CERT_SUFFIX`].
+//!
+//! Key material is returned in SSH wire format (see [`Private`] and
+//! [`Public`]), so it can be passed directly to the authentication layer, and
+//! parsing is driven by [`Parser`]. These methods return the crate-wide
+//! [`crate::error::Result`], which wraps the [`Error`] variants defined here
+//! together with OpenSSL and I/O failures.
+
 use std::collections::HashMap;
 use std::str::Utf8Error;
 
@@ -74,34 +95,53 @@ use crate::{
 //                        // KEY_TYPE_RSA_SHA512_CERT,
 // ];
 
-/// 证书后缀常量
+/// Suffix identifying an OpenSSH certificate key type (`-cert-v01@openssh.com`).
 pub const CERT_SUFFIX: &str = "-cert-v01@openssh.com";
 
+/// A parsed private key whose material is encoded in SSH wire format.
+///
+/// Because [`Private::public`] and [`Private::private`] are SSH wire-format
+/// blobs, they can be fed directly to the authentication layer.
 #[derive(derive_more::Debug)]
 pub struct Private {
+    /// The SSH key type name, such as `ssh-rsa`, `ssh-ed25519` or `ecdsa-sha2-nistp256`.
     pub r#type: String,
+    /// The public key as an SSH wire-format blob.
     #[debug(skip)]
     pub public: Vec<u8>,
+    /// The private key as an SSH wire-format blob.
     #[debug(skip)]
     pub private: Vec<u8>,
+    /// The key comment from the source file, or an empty string if there is none.
     pub comment: String,
 }
 
+/// A parsed public key, either a plain key or an OpenSSH certificate.
 #[derive(derive_more::Debug)]
 pub enum Public {
+    /// A plain public key.
     Normal {
+        /// The SSH key type name, e.g. `ssh-ed25519`.
         r#type: String,
+        /// The key material as an SSH wire-format blob.
         #[debug(skip)]
         content: Vec<u8>,
+        /// The key comment from the source file, if any.
         comment: Option<String>,
     },
+    /// An OpenSSH certificate (`*-cert-v01@openssh.com`).
     Certificate {
+        /// The certificate key type name.
         r#type: String,
+        /// The whole certificate as an SSH wire-format blob.
         #[debug(skip)]
         content: Vec<u8>,
+        /// The key comment from the source file, if any.
         comment: Option<String>,
+        /// The certified user's public key, as an SSH wire-format blob.
         #[debug(skip)]
         public: Vec<u8>,
+        /// The principals (user/host names) the certificate is valid for.
         principals: Vec<String>,
     },
 }
@@ -112,31 +152,60 @@ pub enum Public {
 //     pub comment: Option<String>,
 // }
 
+/// Errors raised while parsing or decrypting keys.
 #[derive(snafu::Snafu, Debug)]
 pub enum Error {
+    /// The key is encrypted and the supplied passphrase did not decrypt it.
     #[snafu(display("Wrong passphrase"))]
     WrongPassphrase,
 
+    /// The key uses a type this crate does not implement.
     #[snafu(display("Unsupported key type: {}", r#type))]
-    UnsupportedKeyType { r#type: String },
+    UnsupportedKeyType {
+        /// The key type name that was encountered.
+        r#type: String,
+    },
 
+    /// The cipher failed to decrypt the key material.
     #[snafu(display("Failed to decrypt key: {}", source))]
-    DecryptionError { source: bcrypt_pbkdf::Error },
+    DecryptionError {
+        /// The underlying cipher error.
+        source: bcrypt_pbkdf::Error,
+    },
 
+    /// The key file did not match the expected format.
     #[snafu(display("Format error: {}", detail))]
     FormatError {
+        /// What was wrong with the format.
         detail: String,
+        /// The source location where the error was raised.
         #[snafu(implicit)]
         location: snafu::Location,
     },
+    /// The key uses a feature this crate does not implement.
     #[snafu(display("Unsupported feature: {}", detail))]
-    UnsupportedFeature { detail: String },
+    UnsupportedFeature {
+        /// The unsupported feature.
+        detail: String,
+    },
+    /// The key uses an algorithm this crate does not implement.
     #[snafu(display("Unsupported algorithm: {}", detail))]
-    UnsupportedAlgorithm { detail: String },
+    UnsupportedAlgorithm {
+        /// The unsupported algorithm.
+        detail: String,
+    },
+    /// A textual field in the key was not valid UTF-8.
     #[snafu(display("Text error: {}", source))]
-    TextError { source: Utf8Error },
+    TextError {
+        /// The UTF-8 decoding error.
+        source: Utf8Error,
+    },
 }
 
+/// Parses OpenSSH private key files (`OPENSSH PRIVATE KEY` and legacy PEM).
+///
+/// The [`Default`] implementation registers every cipher this crate
+/// understands.
 pub struct Parser {
     cipher: HashMap<String, Factory<dyn Decrypt + Send>>,
 }
@@ -503,6 +572,18 @@ impl Parser {
     //     Ok((first.try_into().unwrap(), second.try_into().unwrap()))
     // }
 
+    /// Parses an `openssh-key-v1` private key, starting at the `openssh-key-v1`
+    /// magic (i.e. the binary body of the key, not the PEM-style armor).
+    ///
+    /// Handles both plain (`cipher none`) and encrypted keys; encrypted keys
+    /// derive their key with the `bcrypt` KDF from `passphrase`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::WrongPassphrase`] when no passphrase is supplied for
+    /// an encrypted key, [`Error::UnsupportedFeature`] for multi-key files,
+    /// and [`Error::UnsupportedAlgorithm`] for ciphers this crate does not
+    /// implement.
     pub fn parse_private_key_file_open_ssh(
         &self,
         content: &[u8],
@@ -912,6 +993,17 @@ impl Parser {
         }
     }
 
+    /// Parses a private key file, auto-detecting the format: OpenSSH
+    /// `openssh-key-v1` (base64 body between the standard header/footer) or
+    /// a legacy PEM `PRIVATE KEY` block.
+    ///
+    /// `passphrase` is required for encrypted keys and yields
+    /// [`Error::WrongPassphrase`] if it does not decrypt the key.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::UnsupportedKeyType`] for key types this crate does
+    /// not implement, and [`Error::FormatError`] for malformed input.
     pub fn parse_private_key_file(
         &self,
         content: &[u8],
@@ -1047,6 +1139,9 @@ impl Parser {
         }
     }
 
+    /// Parses a public key file: either an OpenSSH one-line public key
+    /// (`<type> <base64> [comment]`) or an RFC 4716 `---- BEGIN SSH2
+    /// PUBLIC KEY ----` block.
     pub fn parse_public_key_file(&self, content: &[u8]) -> Result<Public> {
         {
             let content = std::str::from_utf8(content).context(TextSnafu)?;
