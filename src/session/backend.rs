@@ -177,6 +177,7 @@ where
     server_ping_supported: bool,
     forward: Forward,
     renegotiating: bool,
+    renegotiate_msg: Option<Vec<u8>>,
 }
 
 impl<T, N> SessionInner<T, N>
@@ -237,6 +238,7 @@ where
             server_version,
             compat_options,
             renegotiating: false,
+            renegotiate_msg: None,
         }
     }
 }
@@ -245,7 +247,7 @@ where
     T: AsyncRead + AsyncWrite + Unpin + Send,
     N: Notifier + Send,
 {
-    pub async fn handle_msg(&mut self, msg: Message<'_>) -> error::Result<()> {
+    pub async fn handle_msg(&mut self, msg: Message<'_>, idle: bool) -> error::Result<()> {
         tracing::info!("Handling message: {:?}", msg);
         let mut handled = true;
         match msg {
@@ -325,8 +327,21 @@ where
                 data,
             } if !self.renegotiating => {
                 self.renegotiating = true;
-                self.renegotiate(Some(data.to_vec())).await?;
-                self.renegotiating = false;
+                if idle {
+                    self.renegotiate(Some(data.to_vec())).await?;
+                    self.renegotiating = false;
+                } else {
+                    tracing::info!(
+                        "We are waiting for response from server, renegotiate msg should be handled later"
+                    );
+                    if self.renegotiate_msg.is_some() {
+                        tracing::warn!(
+                            "We have received renegotiate msg that is still not handled from server"
+                        );
+                    } else {
+                        self.renegotiate_msg = Some(data.to_vec());
+                    }
+                }
             }
             Message::Unrecognized { code, .. } => {
                 tracing::warn!("Unrecognized message: {}", code);
@@ -859,7 +874,7 @@ where
                     self.socket.send_payload(&buffer[..]).await?;
                 }
                 _ => {
-                    self.handle_msg(msg).await?;
+                    self.handle_msg(msg, false).await?;
                 }
             }
         }
@@ -1167,7 +1182,7 @@ where
                 return Err(super::RequestFailureSnafu.build().into());
             } else {
                 let msg = Message::parse(&packet.payload)?;
-                self.handle_msg(msg).await?;
+                self.handle_msg(msg, false).await?;
             }
         }
     }
@@ -1769,7 +1784,9 @@ where
                 back.send_tracing(result);
             }
             Event::Renegotiate { back } => {
+                self.renegotiating = true;
                 let result = self.renegotiate(None).await;
+                self.renegotiating = false;
                 back.send_tracing(result);
             }
             Event::Disconnect {
@@ -2340,7 +2357,7 @@ where
             if let Some(result) = f(self, msg.clone()) {
                 return result;
             } else {
-                self.handle_msg(msg).await?;
+                self.handle_msg(msg, false).await?;
             }
         }
     }
@@ -2355,7 +2372,7 @@ where
             if let Some(result) = f(msg.clone()) {
                 return result;
             } else {
-                self.handle_msg(msg).await?;
+                self.handle_msg(msg, false).await?;
             }
         }
     }
@@ -3106,7 +3123,7 @@ where
                     let packet = packet?;
                     let msg = Message::parse(&packet.payload)?;
 
-                    self.handle_msg(msg).await?;
+                    self.handle_msg(msg, true).await?;
 
                 },
                 event = self.receiver.recv() => {
@@ -3116,6 +3133,11 @@ where
                         break;
                     }
                 }
+            }
+            if let Some(msg) = self.renegotiate_msg.take() {
+                tracing::info!("Handle renegotiate msg now");
+                self.renegotiate(Some(msg)).await?;
+                self.renegotiating = false;
             }
         }
         Ok(())

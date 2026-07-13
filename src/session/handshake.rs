@@ -1084,7 +1084,7 @@ where
                 } else {
                     let message = Message::parse(&packet.payload)?;
 
-                    self.session.handle_msg(message).await?;
+                    self.session.handle_msg(message, false).await?;
                 }
             }
         }
@@ -1148,7 +1148,7 @@ where
                     break;
                 } else {
                     let msg = Message::parse(&packet.payload)?;
-                    self.session.handle_msg(msg).await?;
+                    self.session.handle_msg(msg, false).await?;
                 }
             }
         }
@@ -1244,14 +1244,14 @@ where
                         break;
                     } else {
                         let msg = Message::parse(&packet.payload)?;
-                        self.session.handle_msg(msg).await?;
+                        self.session.handle_msg(msg, false).await?;
                     }
                 }
 
                 break Ok(());
             } else {
                 let msg = Message::parse(&packet.payload)?;
-                self.session.handle_msg(msg).await?;
+                self.session.handle_msg(msg, false).await?;
             }
         }
     }
