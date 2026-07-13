@@ -183,8 +183,8 @@ impl AuthenticateResult {
 }
 
 impl Session {
-    const DEFAULT_INITIAL_WINDOW_SIZE: u32 = 64 * 32 * 1024;
-    const DEFAULT_MAXIMUM_PACKET_SIZE: u32 = 32 * 1024;
+    pub const DEFAULT_INITIAL_WINDOW_SIZE: u32 = 64 * 32 * 1024;
+    pub const DEFAULT_MAXIMUM_PACKET_SIZE: u32 = 32 * 1024;
 
     pub async fn disconnect(
         &self,

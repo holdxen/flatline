@@ -32,8 +32,11 @@ pub enum Message {
     Bytes(Vec<u8>),
 }
 
+#[derive(derive_more::Debug)]
 pub struct Listener<A: 'static, B> {
+    #[debug(skip)]
     receiver: mpsc::Receiver<(Stream, B)>,
+    #[debug(skip)]
     sender: mpsc::Sender<Event>,
     addr: A,
     cancelled: bool,
@@ -188,6 +191,7 @@ impl Listener<SocketAddr, SocketAddr> {
     }
 }
 
+#[derive(Debug)]
 pub struct Stream {
     channel: Channel,
 }

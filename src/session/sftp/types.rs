@@ -573,6 +573,7 @@ impl File {
     }
 }
 
+#[derive(Debug, Clone)]
 pub struct Directory {
     handle: Vec<u8>,
 }

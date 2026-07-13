@@ -31,6 +31,7 @@ impl From<Error> for error::Error {
     }
 }
 
+#[derive(Debug)]
 pub struct FileReceiver<'a> {
     stream: &'a mut Handle,
     mode: u16,
@@ -93,6 +94,7 @@ impl<'a> FileReceiver<'a> {
     }
 }
 
+#[derive(Debug)]
 pub struct FileSender<'a> {
     stream: &'a mut Handle,
 }

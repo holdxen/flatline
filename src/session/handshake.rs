@@ -354,7 +354,7 @@ impl Default for Config {
     }
 }
 
-#[derive(Default, Clone, Copy)]
+#[derive(Default, Clone, Copy, Debug)]
 pub(super) struct CompatOptions {
     pub unsupported_rekey: bool,
     pub curve25519_pad: bool,

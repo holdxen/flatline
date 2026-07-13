@@ -23,7 +23,9 @@ use crate::{
     },
 };
 
+#[derive(derive_more::Debug)]
 struct ListenerHandle<A> {
+    #[debug(skip)]
     sender: mpsc::Sender<(forward::Stream, A)>,
     initial_window_size: u32,
     maximum_packet_size: u32,
@@ -43,9 +45,11 @@ impl<A> ListenerHandle<A> {
     }
 }
 
+#[derive(derive_more::Debug)]
 struct ChannelHandle {
     client: ChannelEndpoint,
     server: ChannelEndpoint,
+    #[debug(skip)]
     sender: mpsc::Sender<channel::Message>,
 }
 
@@ -120,7 +124,7 @@ impl<T> oneshot::Sender<T> {
     }
 }
 
-#[derive(Default)]
+#[derive(Default, derive_more::Debug)]
 struct Forward {
     tcp: HashMap<forward::SocketAddr, ListenerHandle<forward::SocketAddr>>,
     local: HashMap<String, ListenerHandle<()>>,
@@ -159,18 +163,23 @@ impl Forward {
     }
 }
 
+#[derive(derive_more::Debug)]
 pub struct SessionInner<T, N>
 where
     T: AsyncRead + AsyncWrite + Unpin + Send,
 {
     session_id: Vec<u8>,
+    #[debug(skip)]
     socket: CipherStream<T>,
+    #[debug(skip)]
     receiver: mpsc::Receiver<Event>,
     config: super::Config,
     client_version: String,
     server_version: String,
+    #[debug(skip)]
     frontend: mpsc::WeakSender<Event>,
     compat_options: super::CompatOptions,
+    #[debug(skip)]
     notifier: N,
     channels: Vec<ChannelHandle>,
     server_algorithms: Vec<String>,
@@ -247,8 +256,8 @@ where
     T: AsyncRead + AsyncWrite + Unpin + Send,
     N: Notifier + Send,
 {
+    #[tracing::instrument]
     pub async fn handle_msg(&mut self, msg: Message<'_>, idle: bool) -> error::Result<()> {
-        tracing::info!("Handling message: {:?}", msg);
         let mut handled = true;
         match msg {
             Message::Debug {
