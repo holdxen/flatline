@@ -50,8 +50,4 @@ walkdir = "2.5.0"
 [features]
 umac = ["dep:umac"]
 strict = []
-openssl-v101 = ["openssl/v101"]
-openssl-v102 = ["openssl/v102"]
-openssl-v110 = ["openssl/v110"]
-openssl-v111 = ["openssl/v111"]
 openssl-vendored = ["openssl/vendored"]
