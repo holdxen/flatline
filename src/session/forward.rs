@@ -26,6 +26,12 @@ impl SocketAddr {
     }
 }
 
+impl ToString for SocketAddr {
+    fn to_string(&self) -> String {
+        format!("{}:{}", self.host, self.port)
+    }
+}
+
 pub enum Message {
     Close,
     Eof,
