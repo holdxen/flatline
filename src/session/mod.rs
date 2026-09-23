@@ -66,6 +66,61 @@ pub struct Prompt<'a> {
     pub echo: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum AuthenticationMethod {
+    None,
+    PublicKey,
+    Password,
+    HostBased,
+    KeyboardInteractive,
+    GssapiWithMIC,
+    GssapiKeyExchange,
+    Gssapi,
+    ExternalKeyExchange,
+    Unknown(String),
+}
+
+impl From<&str> for AuthenticationMethod {
+    fn from(value: &str) -> Self {
+        match value {
+            "none" => AuthenticationMethod::None,
+            "publickey" => AuthenticationMethod::PublicKey,
+            "password" => AuthenticationMethod::Password,
+            "hostbased" => AuthenticationMethod::HostBased,
+            "keyboard-interactive" => AuthenticationMethod::KeyboardInteractive,
+            "gssapi-with-mic" => AuthenticationMethod::GssapiWithMIC,
+            "gssapi-keyex" => AuthenticationMethod::GssapiKeyExchange,
+            "gssapi" => AuthenticationMethod::Gssapi,
+            "external-keyx" => AuthenticationMethod::ExternalKeyExchange,
+            _ => AuthenticationMethod::Unknown(value.to_string()),
+        }
+    }
+}
+
+
+impl AsRef<str> for AuthenticationMethod {
+    fn as_ref(&self) -> &str {
+        match self {
+            AuthenticationMethod::None => "none",
+            AuthenticationMethod::PublicKey => "publickey",
+            AuthenticationMethod::Password => "password",
+            AuthenticationMethod::HostBased => "hostbased",
+            AuthenticationMethod::KeyboardInteractive => "keyboard-interactive",
+            AuthenticationMethod::GssapiWithMIC => "gssapi-with-mic",
+            AuthenticationMethod::GssapiKeyExchange => "gssapi-keyex",
+            AuthenticationMethod::Gssapi => "gssapi",
+            AuthenticationMethod::ExternalKeyExchange => "external-keyx",
+            AuthenticationMethod::Unknown(method) => method,
+        }
+    }
+}
+
+impl ToString for AuthenticationMethod {
+    fn to_string(&self) -> String {
+        self.as_ref().to_string()
+    }
+}
+
 pub enum InteractiveMethod {
     PAM,
     BSD,
@@ -171,7 +226,7 @@ pub enum AuthenticateResult {
     Success,
     PasswordChangeRequired,
     Failure {
-        allow_methods: Vec<String>,
+        allow_methods: Vec<AuthenticationMethod>,
         partial_success: bool,
     },
 }
