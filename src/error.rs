@@ -32,4 +32,11 @@ pub enum Error {
     KeyError { source: crate::key::Error },
     #[snafu(display("Invalid argument: {}", detail))]
     InvalidArgument { detail: String },
+
+    #[snafu(whatever, display("{message}"))]
+    Whatever {
+        message: String,
+        #[snafu(source(from(Box<dyn std::error::Error + Send + Sync + 'static>, Some)))]
+        source: Option<Box<dyn std::error::Error + Send + Sync + 'static>>,
+    },
 }
