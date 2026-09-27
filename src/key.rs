@@ -1143,31 +1143,46 @@ impl Parser {
     /// (`<type> <base64> [comment]`) or an RFC 4716 `---- BEGIN SSH2
     /// PUBLIC KEY ----` block.
     pub fn parse_public_key_file(&self, content: &[u8]) -> Result<Public> {
+        // Normalise once, up front, and use the result for *both* the SSH2
+        // branch and the one-line parser below. A `.pub` file read from disk
+        // always ends in a newline; letting it reach the comment would make
+        // the comment fail to match the private key's during authentication.
+        let text = std::str::from_utf8(content).context(TextSnafu)?;
+        let text = text.replace("\r\n", "\n").replace('\r', "\n");
+        let text = text.trim();
+
+        if let Some(body) = text.strip_prefix(Self::SSH2_PUBLIC_KEY_HEADER)
+            && let Some(body) = body.strip_suffix(Self::SSH2_PUBLIC_KEY_FOOTER)
         {
-            let content = std::str::from_utf8(content).context(TextSnafu)?;
+            let body = body.trim();
 
-            let content = content.trim().replace("\r\n", "\n");
-            let content = content.replace("\r", "\n");
-
-            if let Some(content) = content.strip_prefix(Self::SSH2_PUBLIC_KEY_HEADER)
-                && let Some(content) = content.strip_suffix(Self::SSH2_PUBLIC_KEY_FOOTER)
+            let lines = body.split('\n').collect::<Vec<&str>>();
+            if lines.len() == 2
+                && let Some(comment) = lines[0].strip_prefix("Comment:")
             {
-                let content = content.trim();
+                // RFC 4716 header fields are `name ":" [FWS] field-value`,
+                // and the field-value is normally a quoted string. Trim the
+                // whitespace after the colon first, then unwrap exactly one
+                // layer of quotes when — and only when — both ends are
+                // quotes; `trim_matches('"')` here would strip the leading
+                // space first and then fail to reach the opening quote.
+                let comment = comment.trim();
+                let comment =
+                    if comment.len() >= 2 && comment.starts_with('"') && comment.ends_with('"') {
+                        &comment[1..comment.len() - 1]
+                    } else {
+                        comment
+                    };
 
-                let lines = content.split("\n").collect::<Vec<&str>>();
-                if lines.len() == 2
-                    && let Some(comment) = lines[0].strip_prefix("Comment:")
-                {
-                    let decoded = decode_block(lines[1]).context(builder::OpenSSL)?;
-                    let mut consumer = Consumer::new(&decoded);
-                    let r#type = consumer.consume_one()?;
-                    let r#type = std::str::from_utf8(r#type).context(TextSnafu)?;
-                    return Ok(Public::Normal {
-                        r#type: r#type.to_string(),
-                        content: decoded,
-                        comment: Some(comment.trim_matches('\"').to_string()),
-                    });
-                }
+                let decoded = decode_block(lines[1]).context(builder::OpenSSL)?;
+                let mut consumer = Consumer::new(&decoded);
+                let r#type = consumer.consume_one()?;
+                let r#type = std::str::from_utf8(r#type).context(TextSnafu)?;
+                return Ok(Public::Normal {
+                    r#type: r#type.to_string(),
+                    content: decoded,
+                    comment: Some(comment.to_string()),
+                });
             }
         }
 
@@ -1175,7 +1190,7 @@ impl Parser {
             byte == b' ' || byte == b'\t'
         }
 
-        let mut consumer = Consumer::new(content);
+        let mut consumer = Consumer::new(text.as_bytes());
 
         let method = 'out: loop {
             let byte = consumer.peek_u8()?;
@@ -1589,6 +1604,16 @@ AAAAC3NzaC1lZDI1NTE5AAAAICP6snZWNXx57b6CBLbCXzfuuEruG32OjLqduVohP1Lt
     const CA_PUBLIC: &str = r#"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEuHxUQkd7PquW69pDnP21ETPdSjWnGgzTER5wzojImZ ca@example.com
 "#;
 
+    /// The private key the fixture certificate was issued to.
+    const USER_ED25519_PRIVATE: &str = r#"-----BEGIN OPENSSH PRIVATE KEY-----
+b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW
+QyNTUxOQAAACD2KO7P+SjSSjQY6WsufkvCqFtGbx1oCstrfEpBe5fhOAAAAJictmGSnLZh
+kgAAAAtzc2gtZWQyNTUxOQAAACD2KO7P+SjSSjQY6WsufkvCqFtGbx1oCstrfEpBe5fhOA
+AAAEBjdOO4VhHkxsyZ33/sVV5kPiC2cibYxvPyUOlVSh/o8/Yo7s/5KNJKNBjpay5+S8Ko
+W0ZvHWgKy2t8SkF7l+E4AAAAEHVzZXJAZXhhbXBsZS5jb20BAgMEBQ==
+-----END OPENSSH PRIVATE KEY-----
+"#;
+
     /// Parses with the passphrase unset; returns the private key material.
     fn parse_plain(content: &str, passphrase: Option<&str>) -> Private {
         Parser::default()
@@ -1754,27 +1779,20 @@ AAAAC3NzaC1lZDI1NTE5AAAAICP6snZWNXx57b6CBLbCXzfuuEruG32OjLqduVohP1Lt
         // The decoded blob carries the wire-format type string.
         assert!(content.starts_with(b"\0\0\0\x0bssh-ed25519"));
 
-        // The comment must survive (it is compared against the private
-        // key's comment during authentication). It may carry a trailing
-        // newline today — see `one_line_public_key_comment_is_trimmed`.
-        assert_eq!(comment.as_deref().map(str::trim), Some("test@example.com"));
+        // The comment must survive verbatim: it is compared against the
+        // private key's comment during authentication, and a stray trailing
+        // newline would make every such comparison warn.
+        assert_eq!(comment.as_deref(), Some("test@example.com"));
     }
 
-    /// KNOWN BUG (not yet fixed): `parse_public_key_file` computes
-    /// `content.trim()` inside the block that handles the SSH2
-    /// `---- BEGIN SSH2 PUBLIC KEY ----` form, then falls through to the
-    /// one-line parser using the *original*, untrimmed bytes. A `.pub` file
-    /// read from disk always ends in `\n`, so the parsed comment comes back
-    /// as `"test@example.com\n"`.
+    /// A `.pub` file always ends in a newline; the parsed comment must not
+    /// carry it.
     ///
     /// This matters because [`Session::authenticate_public_key`] compares
     /// that comment against the private key's comment and logs
     /// `"Public key file and private key file comment mismatch"` on every
     /// authentication with a file-backed public key.
-    ///
-    /// Run with `cargo test -- --ignored key::fixture_test::one_line_public_key_comment_is_trimmed`.
     #[test]
-    #[ignore = "known bug: one-line public key comment keeps a trailing newline"]
     fn one_line_public_key_comment_is_trimmed() {
         let public = Parser::default()
             .parse_public_key_file(PLAIN_ED25519_PUBLIC.as_bytes())
@@ -1784,6 +1802,129 @@ AAAAC3NzaC1lZDI1NTE5AAAAICP6snZWNXx57b6CBLbCXzfuuEruG32OjLqduVohP1Lt
             panic!("expected a plain public key");
         };
         assert_eq!(comment.as_deref(), Some("test@example.com"));
+    }
+
+    /// The same bytes with no trailing newline must parse identically: the
+    /// trim must be a no-op when there is nothing to trim.
+    #[test]
+    fn one_line_public_key_comment_is_stable_with_or_without_newline() {
+        let with_newline = Parser::default()
+            .parse_public_key_file(PLAIN_ED25519_PUBLIC.as_bytes())
+            .expect("must parse");
+        let without_newline = Parser::default()
+            .parse_public_key_file(PLAIN_ED25519_PUBLIC.trim_end().as_bytes())
+            .expect("must parse");
+
+        let (Public::Normal { comment: a, .. }, Public::Normal { comment: b, .. }) =
+            (with_newline, without_newline)
+        else {
+            panic!("expected plain keys");
+        };
+        assert_eq!(a, b, "trailing whitespace must not change the comment");
+        assert_eq!(a.as_deref(), Some("test@example.com"));
+    }
+
+    /// Windows line endings in a `.pub` file must not reach the comment
+    /// either — `\r\n` is normalised before parsing.
+    #[test]
+    fn one_line_public_key_comment_tolerates_crlf() {
+        let crlf = PLAIN_ED25519_PUBLIC.replace('\n', "\r\n");
+        let public = Parser::default()
+            .parse_public_key_file(crlf.as_bytes())
+            .expect("CRLF input must parse");
+
+        let Public::Normal { comment, .. } = public else {
+            panic!("expected a plain public key");
+        };
+        assert_eq!(comment.as_deref(), Some("test@example.com"));
+    }
+
+    /// Leading whitespace must not leak into the key type either.
+    #[test]
+    fn one_line_public_key_tolerates_leading_whitespace() {
+        let padded = format!("  \t{}", PLAIN_ED25519_PUBLIC);
+        let public = Parser::default()
+            .parse_public_key_file(padded.as_bytes())
+            .expect("padded input must parse");
+
+        let Public::Normal {
+            r#type, comment, ..
+        } = public
+        else {
+            panic!("expected a plain public key");
+        };
+        assert_eq!(r#type, "ssh-ed25519");
+        assert_eq!(comment.as_deref(), Some("test@example.com"));
+    }
+
+    /// The exact condition behind the `"Public key file and private key file
+    /// comment mismatch"` warning in `Session::authenticate_public_key`.
+    ///
+    /// A `.pub` file read from disk ends in a newline while the comment
+    /// embedded in the private key does not, so before the parser trimmed
+    /// its input this comparison failed for *every* file-backed public key.
+    #[test]
+    fn public_key_file_comment_matches_the_private_key_comment() {
+        let private = Parser::default()
+            .parse_private_key_file(PLAIN_ED25519_PRIVATE.as_bytes(), None)
+            .expect("private key must parse");
+
+        let public = Parser::default()
+            .parse_public_key_file(PLAIN_ED25519_PUBLIC.as_bytes())
+            .expect("public key must parse");
+
+        let Public::Normal {
+            comment,
+            r#type,
+            content,
+        } = public
+        else {
+            panic!("expected a plain public key");
+        };
+
+        // The two checks `authenticate_public_key` performs, in order.
+        assert_eq!(r#type, private.r#type, "key type mismatch");
+        assert_eq!(content, private.public, "public blob mismatch");
+
+        // ...and the comment check, which must not warn.
+        assert_eq!(
+            comment.unwrap_or_default(),
+            private.comment,
+            "comment mismatch: this would log a warning during authentication"
+        );
+    }
+
+    /// The same, for the certificate path (which compares against the
+    /// private key's comment too).
+    /// The same comparison for the certificate path of
+    /// `Session::authenticate_public_key`, using the key the certificate was
+    /// actually issued to.
+    #[test]
+    fn certificate_comment_matches_the_issuing_private_key_comment() {
+        let private = Parser::default()
+            .parse_private_key_file(USER_ED25519_PRIVATE.as_bytes(), None)
+            .expect("issuing private key must parse");
+
+        let public = Parser::default()
+            .parse_public_key_file(CERT_PUBLIC.as_bytes())
+            .expect("certificate must parse");
+
+        let Public::Certificate {
+            comment, r#type, ..
+        } = public
+        else {
+            panic!("expected a certificate");
+        };
+
+        // `authenticate_public_key` rebuilds this expected type from the
+        // private key plus CERT_SUFFIX.
+        let expected_type = format!("{}{}", private.r#type, CERT_SUFFIX);
+        assert_eq!(r#type, expected_type, "key type mismatch");
+        assert_eq!(
+            comment.unwrap_or_default(),
+            private.comment,
+            "comment mismatch: this would log a warning during authentication"
+        );
     }
 
     #[test]
@@ -1836,31 +1977,20 @@ AAAAC3NzaC1lZDI1NTE5AAAAICP6snZWNXx57b6CBLbCXzfuuEruG32OjLqduVohP1Lt
 
         assert_eq!(r#type, "ssh-ed25519");
         assert!(content.starts_with(b"\0\0\0\x0bssh-ed25519"));
-        // The comment is present; it is not yet stripped of the leading
-        // space and surrounding quotes — see
-        // `ssh2_public_key_comment_is_unquoted`.
-        assert!(
-            comment
-                .as_deref()
-                .is_some_and(|c| c.contains("256-bit ED25519")),
-            "comment missing: {comment:?}"
+        // The comment comes back unwrapped: no leading space, no quotes.
+        assert_eq!(
+            comment.as_deref(),
+            Some("256-bit ED25519, converted by zhouguiqing@zhouguiqingdeMac-m")
         );
     }
 
-    /// KNOWN BUG (not yet fixed): the RFC 4716 branch strips the `Comment:`
-    /// prefix but never trims the whitespace after the colon, and
-    /// `trim_matches('"')` only removes quotes — so a header line of
+    /// The RFC 4716 `Comment:` header must yield the comment itself: no
+    /// leading space, no wrapping quotes.
     ///
-    /// ```text
-    /// Comment: "256-bit ED25519, converted by someone@example.com"
-    /// ```
-    ///
-    /// parses to ` "256-bit ED25519, converted by someone@example.com`
-    /// (leading space kept, trailing quote dropped, leading quote kept).
-    ///
-    /// Run with `cargo test -- --ignored key::fixture_test::ssh2_public_key_comment_is_unquoted`.
+    /// Header fields are `name ":" [FWS] field-value` and the value is
+    /// normally quoted, so the parser has to trim the whitespace after the
+    /// colon *before* unwrapping the quotes.
     #[test]
-    #[ignore = "known bug: SSH2 comment keeps a leading space and stray quotes"]
     fn ssh2_public_key_comment_is_unquoted() {
         let public = Parser::default()
             .parse_public_key_file(SSH2_PUBLIC.as_bytes())
@@ -1873,6 +2003,85 @@ AAAAC3NzaC1lZDI1NTE5AAAAICP6snZWNXx57b6CBLbCXzfuuEruG32OjLqduVohP1Lt
             comment.as_deref(),
             Some("256-bit ED25519, converted by zhouguiqing@zhouguiqingdeMac-m")
         );
+    }
+
+    /// Builds an RFC 4716 block around a single `Comment:` header line.
+    fn ssh2_block(header_line: &str) -> String {
+        format!(
+            "---- BEGIN SSH2 PUBLIC KEY ----\n{header_line}\n{}\n---- END SSH2 PUBLIC KEY ----\n",
+            SSH2_PUBLIC
+                .lines()
+                .nth(2)
+                .expect("fixture has a base64 line")
+        )
+    }
+
+    fn ssh2_comment_of(header_line: &str) -> Option<String> {
+        let parsed = Parser::default()
+            .parse_public_key_file(ssh2_block(header_line).as_bytes())
+            .expect("SSH2 block must parse");
+        let Public::Normal { comment, .. } = parsed else {
+            panic!("expected a plain public key");
+        };
+        comment
+    }
+
+    #[test]
+    fn ssh2_comment_header_forms_all_yield_the_same_value() {
+        let want = "256-bit ED25519";
+
+        // The canonical form ssh-keygen writes, plus the variants a
+        // hand-written or third-party exporter might emit.
+        for line in [
+            format!("Comment: \"{want}\""),
+            format!("Comment:  \"{want}\""), // extra space after the colon
+            format!("Comment:\"{want}\""),   // no space at all
+            format!("Comment: {want}"),      // unquoted
+            format!("Comment:   {want}   "), // padded on both sides
+            format!("Comment: \"{want}\"   "), // space after the closing quote
+        ] {
+            assert_eq!(
+                ssh2_comment_of(&line).as_deref(),
+                Some(want),
+                "header line: {line:?}"
+            );
+        }
+    }
+
+    /// A comment that legitimately starts or ends with a quote character
+    /// must not have interior quotes eaten.
+    #[test]
+    fn ssh2_comment_keeps_interior_quotes() {
+        assert_eq!(
+            ssh2_comment_of("Comment: \"say \\\"hi\\\" now\"").as_deref(),
+            Some("say \\\"hi\\\" now")
+        );
+        // Only one layer of quoting is removed.
+        assert_eq!(
+            ssh2_comment_of("Comment: \"\"double\"\"").as_deref(),
+            Some("\"double\"")
+        );
+    }
+
+    /// A comment with no quotes at all must pass through untouched, apart
+    /// from surrounding whitespace.
+    #[test]
+    fn ssh2_comment_without_quotes_is_trimmed_not_stripped() {
+        assert_eq!(
+            ssh2_comment_of("Comment: plain comment").as_deref(),
+            Some("plain comment")
+        );
+        // A stray trailing quote with no opening one is not a quoted string.
+        assert_eq!(
+            ssh2_comment_of("Comment: ends with quote\"").as_deref(),
+            Some("ends with quote\"")
+        );
+    }
+
+    /// An empty quoted comment is `Some("")`, not `None`.
+    #[test]
+    fn ssh2_comment_can_be_empty() {
+        assert_eq!(ssh2_comment_of("Comment: \"\"").as_deref(), Some(""));
     }
 
     #[test]
@@ -1899,9 +2108,7 @@ AAAAC3NzaC1lZDI1NTE5AAAAICP6snZWNXx57b6CBLbCXzfuuEruG32OjLqduVohP1Lt
         );
         assert_eq!(principals, vec!["alice".to_string(), "bob".to_string()]);
         assert!(!content.is_empty());
-        // Comment tolerates the trailing newline the one-line parser leaves
-        // in place — see `one_line_public_key_comment_is_trimmed`.
-        assert_eq!(comment.as_deref().map(str::trim), Some("user@example.com"));
+        assert_eq!(comment.as_deref(), Some("user@example.com"));
     }
 
     #[test]
