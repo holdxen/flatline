@@ -132,14 +132,19 @@ impl Packet {
 
         let padding_len = consumer.consume_u8()?;
 
-        let payload_len = consumer.peek().len() - padding_len as usize;
-
+        // Validate `padding_len` before subtracting it: it is read straight
+        // off the wire, so checking first keeps a malformed packet from
+        // underflowing the subtraction below.
         if data.len() <= padding_len as usize + 1 {
             return Err(crate::error::builder::InvalidFormat {
                 detail: "Unexpected padding length",
             }
             .build());
         }
+
+        // The check above guarantees `peek().len() > padding_len`, so this
+        // cannot underflow and the payload is at least one byte long.
+        let payload_len = consumer.peek().len() - padding_len as usize;
 
         let payload = consumer.consume_bytes(payload_len)?.to_vec();
 
@@ -1136,24 +1141,71 @@ mod test {
         assert_eq!(packet.padding, [9, 9, 9, 9]);
     }
 
-    /// KNOWN BUG (not yet fixed): `Packet::parse` computes
-    /// `payload_len = body_len - padding_len` *before* validating that
-    /// `padding_len` fits inside the body, so a malformed packet panics with
-    /// an arithmetic overflow in debug builds.
-    ///
-    /// Release builds wrap the subtraction and are saved only by the
-    /// subsequent `data.len() <= padding_len + 1` check, which is why this is
-    /// a panic rather than a wrong answer — but any peer can trigger it, so
-    /// the check should run before the subtraction.
-    ///
-    /// Run with `cargo test -- --ignored packet_parse_rejects_padding_longer_than_body`
-    /// to check whether it has been fixed.
     #[test]
-    #[ignore = "known bug: Packet::parse underflows on padding_len > body"]
     fn packet_parse_rejects_padding_longer_than_body() {
-        // padding_len (200) exceeds the remaining bytes
+        // padding_len (200) exceeds the remaining bytes: the subtraction
+        // that derives payload_len must not run before the bounds check.
         let raw = [200u8, 1, 2, 3];
-        assert!(Packet::parse(&raw).is_err());
+        let err = Packet::parse(&raw).expect_err("padding longer than the body");
+        assert!(
+            err.to_string().contains("Unexpected padding length"),
+            "unexpected error: {err}"
+        );
+    }
+
+    /// The regression test for the underflow: `padding_len` is read straight
+    /// off the wire, so every value larger than the body must produce an
+    /// error rather than a wrapping subtraction.
+    #[test]
+    fn packet_parse_never_underflows_on_padding_len() {
+        for padding_len in [4u8, 5, 8, 64, 128, 200, 254, 255] {
+            // Body shorter than the claimed padding.
+            let mut raw = vec![padding_len];
+            raw.extend_from_slice(&[0u8; 3]);
+            assert!(
+                Packet::parse(&raw).is_err(),
+                "padding_len {padding_len} with a 3-byte body must be rejected"
+            );
+
+            // Body exactly padding_len + 1 long: no room for any payload.
+            let mut raw = vec![padding_len];
+            raw.extend(std::iter::repeat_n(0u8, padding_len as usize));
+            assert!(
+                Packet::parse(&raw).is_err(),
+                "padding_len {padding_len} filling the whole body must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn packet_parse_accepts_padding_len_one_below_the_body_end() {
+        // Body = 1 (payload) + padding: just enough room, so this parses.
+        let mut raw = vec![3u8];
+        raw.push(b'x'); // one byte of payload
+        raw.extend_from_slice(&[7, 7, 7]); // three bytes of padding
+
+        let packet = Packet::parse(&raw).unwrap();
+        assert_eq!(packet.payload, b"x");
+        assert_eq!(packet.padding, [7, 7, 7]);
+    }
+
+    #[test]
+    fn packet_parse_rejects_an_empty_body() {
+        // Only the padding-length byte, nothing behind it.
+        assert!(Packet::parse(&[0u8]).is_err());
+        // No padding length at all.
+        assert!(Packet::parse(&[]).is_err());
+    }
+
+    #[test]
+    fn packet_parse_allows_zero_padding() {
+        // padding_len = 0 is accepted by this parser: everything behind the
+        // length byte is payload. (RFC 4253 requires at least 4 bytes of
+        // padding on the wire, but that is enforced by the packet layer
+        // rather than here.)
+        let packet = Packet::parse(&[0u8, 1, 2]).unwrap();
+        assert_eq!(packet.payload, [1, 2]);
+        assert!(packet.padding.is_empty());
     }
 
     #[test]
@@ -1161,5 +1213,18 @@ mod test {
         // padding_len equals the whole body => payload would be empty/invalid
         let raw = [3u8, 1, 2, 3];
         assert!(Packet::parse(&raw).is_err());
+    }
+
+    /// A well-formed packet with the maximum padding length a `u8` allows
+    /// must still parse when the body is big enough.
+    #[test]
+    fn packet_parse_handles_max_padding_len() {
+        let mut raw = vec![255u8];
+        raw.push(b'p'); // one byte of payload
+        raw.extend(std::iter::repeat_n(9u8, 255)); // 255 bytes of padding
+
+        let packet = Packet::parse(&raw).unwrap();
+        assert_eq!(packet.payload, b"p");
+        assert_eq!(packet.padding.len(), 255);
     }
 }
