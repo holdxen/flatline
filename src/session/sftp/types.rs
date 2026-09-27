@@ -69,6 +69,16 @@ bitflags::bitflags! {
     /// others; the file type is not part of this type and is carried
     /// separately by [`FileType`] (both are recombined by
     /// [`PermissionsAndFileType::bits`] before they go on the wire).
+    ///
+    /// Each octal digit of a `mode_t` is three bits, so the three classes
+    /// are shifted by 0, 3 and 6: `OTHER_*` occupies bits 0..=2, `GROUP_*`
+    /// bits 3..=5 and `OWNER_*` bits 6..=8. SFTP itself does not define
+    /// these values — draft-ietf-secsh-filexfer-01 section 5 says the field
+    /// is "a bit mask of file permissions as defined by [POSIX]".
+    ///
+    /// Set-user-ID (`0o4000`), set-group-ID (`0o2000`) and the sticky bit
+    /// (`0o1000`) are deliberately not modelled; see
+    /// [`TryFrom<u32> for PermissionsAndFileType`].
     pub struct Permissions: u32 {
         /// Others: execute permission (`0o001`).
         const OTHER_EXEC                        = 1 << 0;
@@ -78,18 +88,18 @@ bitflags::bitflags! {
         const OTHER_READ                        = 1 << 2;
 
         /// Group: execute permission (`0o010`).
-        const GROUP_EXEC                        = 1 << 0 << 4;
+        const GROUP_EXEC                        = 1 << 0 << 3;
         /// Group: write permission (`0o020`).
-        const GROUP_WRITE                       = 1 << 1 << 4;
+        const GROUP_WRITE                       = 1 << 1 << 3;
         /// Group: read permission (`0o040`).
-        const GROUP_READ                        = 1 << 2 << 4;
+        const GROUP_READ                        = 1 << 2 << 3;
 
         /// Owner: execute permission (`0o100`).
-        const OWNER_EXEC                        = 1 << 0 << 8;
+        const OWNER_EXEC                        = 1 << 0 << 6;
         /// Owner: write permission (`0o200`).
-        const OWNER_WRITE                       = 1 << 1 << 8;
+        const OWNER_WRITE                       = 1 << 1 << 6;
         /// Owner: read permission (`0o400`).
-        const OWNER_READ                        = 1 << 2 << 8;
+        const OWNER_READ                        = 1 << 2 << 6;
     }
 }
 
@@ -911,21 +921,13 @@ mod test {
         assert_eq!(combo.bits() & 0o4000, 0);
     }
 
-    /// KNOWN BUG (not yet fixed): the `GROUP_*` and `OWNER_*` constants do not
-    /// match POSIX/SFTP mode bits.
+    /// Regression test: every permission constant must equal its POSIX value.
     ///
-    /// The doc comments on [`Permissions`] give the POSIX values (`0o010`,
-    /// `0o200`, ...) but the definitions shift one bit too far for group
-    /// (`1 << n << 4` = `0o020`, should be `1 << n << 3`) and two bits too
-    /// far for owner (`1 << n << 8` = `0o1000`, should be `1 << n << 6`).
-    /// As a result `PermissionsAndFileType::try_from(mode).bits()` is lossy for
-    /// any real `mode_t` — e.g. `0o755` loses `0o200` and `0o010` — and
-    /// `Permissions::OWNER_READ.bits()` is `0o2000` instead of `0o400`.
-    ///
-    /// Run with `cargo test -- --ignored permissions_group_and_owner_bits_match_posix`
-    /// to check whether it has been fixed.
+    /// SFTP does not define these bits itself — draft-ietf-secsh-filexfer-01
+    /// section 5 defers to POSIX — so the only way to get them wrong is to
+    /// shift by the wrong amount (an octal digit is 3 bits, not 4).
+
     #[test]
-    #[ignore = "known bug: Permissions GROUP_*/OWNER_* constants are shifted"]
     fn permissions_group_and_owner_bits_match_posix() {
         assert_eq!(Permissions::OTHER_EXEC.bits(), 0o001);
         assert_eq!(Permissions::OTHER_WRITE.bits(), 0o002);
@@ -937,9 +939,89 @@ mod test {
         assert_eq!(Permissions::OWNER_WRITE.bits(), 0o200);
         assert_eq!(Permissions::OWNER_READ.bits(), 0o400);
 
-        // A real mode_t must survive try_from/bits unharmed.
-        let combo = PermissionsAndFileType::try_from(0o40755).unwrap();
+        // The three classes must tile the low nine bits with no overlap.
+        let all = Permissions::OTHER_EXEC
+            | Permissions::OTHER_WRITE
+            | Permissions::OTHER_READ
+            | Permissions::GROUP_EXEC
+            | Permissions::GROUP_WRITE
+            | Permissions::GROUP_READ
+            | Permissions::OWNER_EXEC
+            | Permissions::OWNER_WRITE
+            | Permissions::OWNER_READ;
+        assert_eq!(all.bits(), 0o777, "the rwx classes must be exactly 0o777");
+    }
+
+    /// Every POSIX mode a server can plausibly send must survive
+    /// `try_from` -> `bits()` unchanged.
+    ///
+    /// This is the read path: `stat`/`readdir` hand the result straight to
+    /// callers, who may write it back with `set_stat`. A lossy round trip
+    /// silently changes permissions on the server (e.g. `0o644` -> `0o444`).
+    #[test]
+    fn permissions_round_trip_is_lossless_for_real_modes() {
+        // Regular file, directory, and symlink with a spread of rwx modes.
+        for type_bits in [0o100000u32, 0o40000, 0o120000] {
+            for rwx in [
+                0o000, 0o444, 0o644, 0o664, 0o666, 0o755, 0o700, 0o777, 0o500, 0o111, 0o420,
+            ] {
+                let mode = type_bits | rwx;
+                let back = PermissionsAndFileType::try_from(mode).unwrap().bits();
+                assert_eq!(back, mode, "round trip of {mode:#07o}");
+            }
+        }
+    }
+
+    /// `p0755()` is the value used by `mkdir`/`open_file` and must stay
+    /// POSIX-correct on the wire.
+    #[test]
+    fn p0755_is_the_posix_directory_mode() {
+        let combo = PermissionsAndFileType::new(Permissions::p0755(), FileType::Directory);
         assert_eq!(combo.bits(), 0o40755);
+        // And it must survive being parsed back.
+        assert_eq!(
+            PermissionsAndFileType::try_from(combo.bits())
+                .unwrap()
+                .bits(),
+            0o40755
+        );
+    }
+
+    /// Composing a mode from the named constants must produce the POSIX
+    /// value, since that is how callers build permissions without knowing
+    /// octal literals.
+    #[test]
+    fn mode_built_from_constants_matches_posix() {
+        // rw-r--r--
+        let rw_r__r__ = Permissions::OWNER_READ
+            | Permissions::OWNER_WRITE
+            | Permissions::GROUP_READ
+            | Permissions::OTHER_READ;
+        assert_eq!(rw_r__r__.bits(), 0o644);
+
+        // rwxr-xr-x
+        let rwxr_xr_x = Permissions::OWNER_READ
+            | Permissions::OWNER_WRITE
+            | Permissions::OWNER_EXEC
+            | Permissions::GROUP_READ
+            | Permissions::GROUP_EXEC
+            | Permissions::OTHER_READ
+            | Permissions::OTHER_EXEC;
+        assert_eq!(rwxr_xr_x.bits(), 0o755);
+    }
+
+    /// Set-user-ID / set-group-ID / sticky are not modelled by
+    /// [`Permissions`], so `try_from` drops them — this is the documented
+    /// behaviour, asserted here so a future change is a deliberate one.
+    #[test]
+    fn special_bits_are_dropped_by_try_from() {
+        let combo = PermissionsAndFileType::try_from(0o104755).unwrap();
+        assert_eq!(combo.bits(), 0o104755 & !0o7000, "setuid must be dropped");
+        assert_eq!(combo.file_type, FileType::RegularFile);
+
+        // A file with *only* special bits set still round-trips its rwx part.
+        let combo = PermissionsAndFileType::try_from(0o40000 | 0o4755).unwrap();
+        assert_eq!(combo.permissions.bits(), 0o755);
     }
 
     #[test]
