@@ -6,8 +6,6 @@
 //! one to [`Session::handshake`](super::Session::handshake) to install it;
 //! [`DefaultNotifier`] logs every event and accepts the default policy.
 
-use std::path::PathBuf;
-
 use tokio::sync::oneshot;
 
 use crate::error;

@@ -1,3 +1,4 @@
+#![allow(missing_docs)]
 //! Crate-wide error type, [`Result`] alias, and helper function.
 //!
 //! [`Error`] is the error type returned by fallible operations throughout the
