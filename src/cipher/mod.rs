@@ -137,3 +137,186 @@ pub enum Error {
 /// negotiation so that each direction of the connection gets its own
 /// algorithm state.
 pub type Factory<T> = Box<dyn (Fn() -> Box<T>) + Send + Sync>;
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    /// Every algorithm registry must agree with itself: `*_all()` lists the
+    /// names, `new_*_all()` builds one factory per name, and
+    /// `new_*_by_name()` resolves each of them.
+    #[test]
+    fn key_exchange_registry_is_consistent() {
+        let names = kex::all();
+        let factories = kex::new_all();
+
+        assert!(!names.is_empty());
+        assert_eq!(factories.len(), names.len());
+        for name in names {
+            assert!(
+                factories.contains_key(*name),
+                "missing from new_all: {name}"
+            );
+            let factory = kex::new_kex_by_name(name)
+                .unwrap_or_else(|| panic!("new_kex_by_name returned None for {name}"));
+            let kex = factory();
+            assert_eq!(kex.name(), *name);
+        }
+
+        assert!(kex::new_kex_by_name("no-such-kex").is_none());
+    }
+
+    /// Registry key -> the name the produced instance reports.
+    ///
+    /// Two OpenSSH aliases are registered as equivalent ciphers, so the
+    /// instance reports the canonical cipher's name instead of the alias.
+    /// `name()` is only used for logging (algorithm selection keys off the
+    /// registry key), so this is cosmetic — but it is surprising, hence the
+    /// explicit table rather than a silent exception.
+    fn cipher_reported_name(registry_key: &str) -> &str {
+        match registry_key {
+            "rijndael-cbc@lysator.liu.se" => "aes256-cbc",
+            other => other,
+        }
+    }
+
+    #[test]
+    fn cipher_registry_is_consistent() {
+        let names = crypt::encrypt_all();
+        assert!(!names.is_empty());
+
+        let encryptors = crypt::new_encrypt_all();
+        assert_eq!(encryptors.len(), names.len());
+        for name in names {
+            assert!(encryptors.contains_key(*name));
+            let enc = crypt::new_encrypt_by_name(name).expect("missing encrypt factory")();
+            assert_eq!(enc.name(), cipher_reported_name(name));
+        }
+
+        let decryptors = crypt::new_decrypt_all();
+        assert_eq!(decryptors.len(), names.len());
+        for name in names {
+            assert!(decryptors.contains_key(*name));
+            let dec = crypt::new_decrypt_by_name(name).expect("missing decrypt factory")();
+            assert_eq!(dec.name(), cipher_reported_name(name));
+        }
+
+        assert!(crypt::new_encrypt_by_name("no-such-cipher").is_none());
+        assert!(crypt::new_decrypt_by_name("no-such-cipher").is_none());
+    }
+
+    /// KNOWN QUIRK (not yet fixed): `rijndael-cbc@lysator.liu.se` reports
+    /// `aes256-cbc` from `name()`, so logs that print the negotiated cipher
+    /// show the canonical name rather than the alias the peer chose.
+    #[test]
+    #[ignore = "known quirk: rijndael-cbc alias reports name() as aes256-cbc"]
+    fn cipher_alias_reports_its_registry_key() {
+        let enc = crypt::new_encrypt_by_name("rijndael-cbc@lysator.liu.se").unwrap()();
+        assert_eq!(enc.name(), "rijndael-cbc@lysator.liu.se");
+    }
+
+    #[test]
+    fn mac_registry_is_consistent() {
+        let names = mac::all();
+        assert!(!names.is_empty());
+
+        let factories = mac::new_all();
+        assert_eq!(factories.len(), names.len());
+        for name in names {
+            assert!(factories.contains_key(*name));
+            let mac = mac::new_mac_by_name(name).expect("missing mac factory")();
+            assert_eq!(mac.name(), *name);
+            assert_eq!(mac.mac_len() > 0, true);
+            assert_eq!(mac.key_len() > 0, true);
+        }
+
+        assert!(mac::new_mac_by_name("no-such-mac").is_none());
+    }
+
+    #[test]
+    fn compression_registry_is_consistent() {
+        let names = compress::encode_all();
+        assert!(!names.is_empty());
+
+        let encoders = compress::new_encode_all();
+        assert_eq!(encoders.len(), names.len());
+        for name in names {
+            let enc = compress::new_encode_by_name(name).expect("missing encode factory")();
+            assert_eq!(enc.name(), *name);
+        }
+
+        let decoders = compress::new_decode_all();
+        assert_eq!(decoders.len(), names.len());
+        for name in names {
+            let dec = compress::new_decode_by_name(name).expect("missing decode factory")();
+            assert_eq!(dec.name(), *name);
+        }
+
+        assert!(compress::new_encode_by_name("no-such-coding").is_none());
+        assert!(compress::new_decode_by_name("no-such-coding").is_none());
+    }
+
+    #[test]
+    fn signature_registry_is_consistent() {
+        let names = signature::signature_all();
+        assert!(!names.is_empty());
+
+        let signers = signature::new_signature_all();
+        assert_eq!(signers.len(), names.len());
+        for name in names {
+            let signer = signature::new_signature_by_name(name).expect("missing signer")();
+            assert_eq!(signer.name(), *name);
+        }
+
+        let verifiers = signature::new_verify_all();
+        for name in signature::verify_all() {
+            assert!(verifiers.contains_key(*name));
+            let verifier = signature::new_verify_by_name(name).expect("missing verifier")();
+            assert_eq!(verifier.name(), *name);
+        }
+
+        assert!(signature::new_signature_by_name("no-such-sig").is_none());
+        assert!(signature::new_verify_by_name("no-such-sig").is_none());
+    }
+
+    /// Factories must produce independent instances, since each direction of
+    /// a connection gets its own algorithm state.
+    #[test]
+    fn factories_produce_independent_instances() {
+        let mut a = mac::new_mac_by_name("hmac-sha2-256").expect("factory")();
+        let mut b = mac::new_mac_by_name("hmac-sha2-256").expect("factory")();
+
+        let key = [7u8; 32];
+        a.initialize(&key).unwrap();
+        b.initialize(&key).unwrap();
+
+        a.update(&1u32.to_be_bytes()).unwrap();
+        a.update(b"payload").unwrap();
+        let tag_a = a.finalize().unwrap();
+
+        // b never saw any data, so its tag must differ from a's.
+        b.update(&1u32.to_be_bytes()).unwrap();
+        b.update(b"other!").unwrap();
+        let tag_b = b.finalize().unwrap();
+
+        assert_ne!(tag_a, tag_b);
+    }
+
+    #[test]
+    fn error_variants_display_distinctly() {
+        let cases = [
+            (Error::InvalidPrime, "Invalid prime"),
+            (Error::CompressError, "Compression error"),
+            (Error::MacVerificationFailed, "MAC verification failed"),
+            (Error::MismatchKey, "Mismatch key"),
+            (
+                Error::SignatureVerificationFailed,
+                "Signature verification failed",
+            ),
+            (Error::KeyLengthMismatch, "Key length mismatch"),
+        ];
+        for (err, expected) in cases {
+            assert_eq!(err.to_string(), expected);
+        }
+    }
+}

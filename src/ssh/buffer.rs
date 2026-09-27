@@ -341,3 +341,171 @@ impl<'a> Consumer<'a> {
         Ok(ret)
     }
 }
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn producer_consumer_round_trip() {
+        let mut producer = Producer::default();
+        producer.put_u8(0x7f);
+        producer.put_u32(0xdead_beef);
+        producer.put_u64(0x0123_4567_89ab_cdef);
+        producer.put_one(b"hello");
+        producer.put_bytes([1, 2, 3]);
+
+        assert_eq!(producer.len(), 1 + 4 + 8 + 4 + 5 + 3);
+
+        let data = producer.into_vec();
+        let mut consumer = Consumer::new(&data);
+
+        assert_eq!(consumer.len(), data.len());
+        assert_eq!(consumer.consume_u8().unwrap(), 0x7f);
+        assert_eq!(consumer.consume_u32().unwrap(), 0xdead_beef);
+        assert_eq!(consumer.consume_u64().unwrap(), 0x0123_4567_89ab_cdef);
+        assert_eq!(consumer.consume_one().unwrap(), b"hello");
+        assert_eq!(consumer.consume_bytes(3).unwrap(), [1, 2, 3]);
+        assert!(consumer.is_empty());
+        assert_eq!(consumer.len(), 0);
+    }
+
+    #[test]
+    fn producer_put_one_writes_length_prefix() {
+        let mut producer = Producer::default();
+        producer.put_one(b"abc");
+
+        // 4-byte big-endian length followed by the bytes.
+        assert_eq!(producer.as_bytes(), &[0, 0, 0, 3, b'a', b'b', b'c']);
+        assert_eq!(producer[0..4], [0, 0, 0, 3]);
+    }
+
+    #[test]
+    fn producer_index_and_resize() {
+        let mut producer = Producer::default();
+        producer.put_u32(0);
+
+        producer[0] = 0xff;
+        assert_eq!(producer[0], 0xff);
+        assert_eq!(producer[..4], [0xff, 0, 0, 0]);
+
+        producer.resize(6, 0xaa);
+        assert_eq!(producer.len(), 6);
+        assert_eq!(producer[4..], [0xaa, 0xaa]);
+    }
+
+    #[test]
+    fn producer_into_vec_preserves_bytes() {
+        let mut producer = Producer::with_capacity(4);
+        producer.put_u8(1);
+        producer.put_u8(2);
+
+        assert_eq!(producer.into_vec(), vec![1, 2]);
+    }
+
+    #[test]
+    fn consumer_peek_does_not_advance() {
+        let data = [1, 2, 3, 4];
+        let mut consumer = Consumer::new(&data);
+
+        assert_eq!(consumer.peek(), &data[..]);
+        assert_eq!(consumer.peek_u8().unwrap(), 1);
+        assert_eq!(consumer.peek(), &data[..]);
+        assert_eq!(consumer.len(), 4);
+
+        consumer.consume(2);
+        assert_eq!(consumer.peek(), &[3, 4]);
+        assert_eq!(consumer.consume_u8().unwrap(), 3);
+    }
+
+    #[test]
+    fn consumer_consume_all_drains_buffer() {
+        let data = [9, 8, 7];
+        let mut consumer = Consumer::new(&data);
+
+        consumer.consume_all();
+        assert!(consumer.is_empty());
+        assert_eq!(consumer.len(), 0);
+        assert!(consumer.peek().is_empty());
+    }
+
+    #[test]
+    fn consumer_truncated_u32_fails() {
+        let mut consumer = Consumer::new(&[0, 0, 1]);
+        let err = consumer.consume_u32().unwrap_err();
+        assert!(
+            err.to_string().contains("Unexpected end of buffer"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn consumer_truncated_u64_fails() {
+        let mut consumer = Consumer::new(&[0; 7]);
+        let err = consumer.consume_u64().unwrap_err();
+        assert!(
+            err.to_string().contains("Unexpected end of buffer"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn consumer_one_longer_than_remaining_fails() {
+        // Length prefix says 100 bytes but only 2 follow.
+        let data = [0, 0, 0, 100, 1, 2];
+        let mut consumer = Consumer::new(&data);
+        let err = consumer.consume_one().unwrap_err();
+        assert!(
+            err.to_string().contains("Unexpected end of buffer"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn consumer_bytes_past_end_fails() {
+        let mut consumer = Consumer::new(&[1, 2]);
+        let err = consumer.consume_bytes(3).unwrap_err();
+        assert!(
+            err.to_string().contains("Unexpected end of buffer"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn consumer_u8_on_empty_fails() {
+        let mut consumer = Consumer::new(&[]);
+        assert!(consumer.consume_u8().is_err());
+        assert!(Consumer::new(&[]).peek_u8().is_err());
+    }
+
+    #[test]
+    fn consumer_empty_is_empty_but_new_is_not() {
+        let mut consumer = Consumer::new(&[1]);
+        assert!(!consumer.is_empty());
+
+        consumer.consume(1);
+        assert!(consumer.is_empty());
+    }
+
+    #[test]
+    fn make_buffer_prepends_length() {
+        let buffer = make_buffer!(u8: 7u8, u32: 9u32);
+        // 4-byte total length, then u8, then u32.
+        assert_eq!(buffer.as_bytes(), &[0, 0, 0, 5, 7, 0, 0, 0, 9]);
+    }
+
+    #[test]
+    fn make_buffer_without_header_has_no_length_prefix() {
+        let buffer = make_buffer_without_header!(one: b"xy");
+        assert_eq!(buffer.as_bytes(), &[0, 0, 0, 2, b'x', b'y']);
+    }
+
+    #[test]
+    fn match_type_sizes() {
+        assert_eq!(match_type!(u8), 1);
+        assert_eq!(match_type!(u32), 4);
+        assert_eq!(match_type!(u64), 8);
+        assert_eq!(match_type!(one, b"abc"), 7);
+        assert_eq!(match_type!(bytes, [1, 2]), 2);
+    }
+}

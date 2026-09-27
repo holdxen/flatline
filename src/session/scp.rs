@@ -467,8 +467,9 @@ mod test {
     use openssl::md_ctx::MdCtx;
 
     #[tokio::test]
+    #[ignore = "requires a live SSH server configured in Test.toml"]
     async fn test_sending_file() -> anyhow::Result<()> {
-        tracing_subscriber::fmt::init();
+        let _ = tracing_subscriber::fmt::try_init();
 
         let config = Config::load().await?;
         let session = config.open_session().await?;
@@ -551,8 +552,9 @@ mod test {
     }
 
     #[tokio::test]
+    #[ignore = "requires a live SSH server configured in Test.toml"]
     async fn test_create_directory() -> anyhow::Result<()> {
-        tracing_subscriber::fmt::init();
+        let _ = tracing_subscriber::fmt::try_init();
         let target = "test_scp";
 
         let config = Config::load().await?;

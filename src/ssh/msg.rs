@@ -612,3 +612,554 @@ impl<'a> Message<'a> {
         }
     }
 }
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    /// Builds a message payload: one message-code byte followed by `body`.
+    fn payload(code: u8, body: &[u8]) -> Vec<u8> {
+        let mut out = vec![code];
+        out.extend_from_slice(body);
+        out
+    }
+
+    /// Encodes an SSH `string`: a 4-byte big-endian length followed by bytes.
+    fn ssh_string(bytes: &[u8]) -> Vec<u8> {
+        let mut out = (bytes.len() as u32).to_be_bytes().to_vec();
+        out.extend_from_slice(bytes);
+        out
+    }
+
+    #[test]
+    fn parse_disconnect() {
+        let mut body = Vec::new();
+        body.extend_from_slice(&11u32.to_be_bytes()); // SSH_DISCONNECT_BY_APPLICATION
+        body.extend_from_slice(&ssh_string(b"bye"));
+        body.extend_from_slice(&ssh_string(b"en"));
+
+        let data = payload(SSH_MSG_DISCONNECT, &body);
+        let msg = Message::parse(&data).unwrap();
+        let Message::Disconnect {
+            reason,
+            description,
+            language,
+        } = msg
+        else {
+            panic!("expected Disconnect, got {msg:?}");
+        };
+        assert_eq!(reason, DisconnectReason(11));
+        assert_eq!(description, "bye");
+        assert_eq!(language, "en");
+    }
+
+    #[test]
+    fn parse_ignore_carries_data() {
+        let mut body = Vec::new();
+        body.extend_from_slice(&ssh_string(b"junk"));
+
+        let data = payload(SSH_MSG_IGNORE, &body);
+        let msg = Message::parse(&data).unwrap();
+        let Message::Ignore { data } = msg else {
+            panic!("expected Ignore, got {msg:?}");
+        };
+        assert_eq!(data, b"junk");
+    }
+
+    #[test]
+    fn parse_service_accept() {
+        let mut body = Vec::new();
+        body.extend_from_slice(&ssh_string(b"ssh-userauth"));
+
+        let data = payload(SSH_MSG_SERVICE_ACCEPT, &body);
+        let msg = Message::parse(&data).unwrap();
+        let Message::ServiceAccept { service } = msg else {
+            panic!("expected ServiceAccept, got {msg:?}");
+        };
+        assert_eq!(service, "ssh-userauth");
+    }
+
+    #[test]
+    fn parse_userauth_success_and_failure() {
+        let data = payload(SSH_MSG_USERAUTH_SUCCESS, &[]);
+        let msg = Message::parse(&data).unwrap();
+        assert!(matches!(msg, Message::AuthenticationSuccess));
+
+        let mut body = Vec::new();
+        body.extend_from_slice(&ssh_string(b"publickey,password"));
+        body.push(1); // partial success
+
+        let data = payload(SSH_MSG_USERAUTH_FAILURE, &body);
+        let msg = Message::parse(&data).unwrap();
+        let Message::AuthenticationFailure {
+            allow_methods,
+            partial_success,
+        } = msg
+        else {
+            panic!("expected AuthenticationFailure, got {msg:?}");
+        };
+        assert_eq!(allow_methods, vec!["publickey", "password"]);
+        assert!(partial_success);
+    }
+
+    #[test]
+    fn parse_userauth_banner() {
+        let mut body = Vec::new();
+        body.extend_from_slice(&ssh_string(b"hello"));
+        body.extend_from_slice(&ssh_string(b""));
+
+        let data = payload(SSH_MSG_USERAUTH_BANNER, &body);
+        let msg = Message::parse(&data).unwrap();
+        let Message::AuthenticationBanner { message, language } = msg else {
+            panic!("expected AuthenticationBanner, got {msg:?}");
+        };
+        assert_eq!(message, "hello");
+        assert_eq!(language, "");
+    }
+
+    #[test]
+    fn parse_channel_open_confirmation() {
+        let mut body = Vec::new();
+        for value in [0u32, 7, 1024, 32768] {
+            body.extend_from_slice(&value.to_be_bytes());
+        }
+
+        let data = payload(SSH_MSG_CHANNEL_OPEN_CONFIRMATION, &body);
+        let msg = Message::parse(&data).unwrap();
+        let Message::ChannelOpenConfirmation {
+            recipient_channel,
+            sender_channel,
+            initial_window_size,
+            maximum_packet_size,
+        } = msg
+        else {
+            panic!("expected ChannelOpenConfirmation, got {msg:?}");
+        };
+        assert_eq!((recipient_channel, sender_channel), (0, 7));
+        assert_eq!((initial_window_size, maximum_packet_size), (1024, 32768));
+    }
+
+    #[test]
+    fn parse_channel_data_and_extended_data() {
+        let mut body = Vec::new();
+        body.extend_from_slice(&3u32.to_be_bytes());
+        body.extend_from_slice(&4u32.to_be_bytes());
+        body.extend_from_slice(b"data");
+
+        let data = payload(SSH_MSG_CHANNEL_DATA, &body);
+        let msg = Message::parse(&data).unwrap();
+        let Message::ChannelData {
+            recipient_channel,
+            data,
+        } = msg
+        else {
+            panic!("expected ChannelData, got {msg:?}");
+        };
+        assert_eq!(recipient_channel, 3);
+        assert_eq!(data, b"data");
+
+        let mut body = Vec::new();
+        body.extend_from_slice(&3u32.to_be_bytes());
+        body.extend_from_slice(&1u32.to_be_bytes()); // SSH_EXTENDED_DATA_STDERR
+        body.extend_from_slice(&3u32.to_be_bytes());
+        body.extend_from_slice(b"err");
+
+        let data = payload(SSH_MSG_CHANNEL_EXTENDED_DATA, &body);
+        let msg = Message::parse(&data).unwrap();
+        let Message::ChannelExtendedData {
+            recipient_channel,
+            data_type,
+            data,
+        } = msg
+        else {
+            panic!("expected ChannelExtendedData, got {msg:?}");
+        };
+        assert_eq!(recipient_channel, 3);
+        assert_eq!(data_type, 1);
+        assert_eq!(data, b"err");
+    }
+
+    #[test]
+    fn parse_channel_window_adjust() {
+        let mut body = Vec::new();
+        body.extend_from_slice(&5u32.to_be_bytes());
+        body.extend_from_slice(&65536u32.to_be_bytes());
+
+        let data = payload(SSH_MSG_CHANNEL_WINDOW_ADJUST, &body);
+        let msg = Message::parse(&data).unwrap();
+        let Message::ChannelWindowAdjust {
+            recipient_channel,
+            count,
+        } = msg
+        else {
+            panic!("expected ChannelWindowAdjust, got {msg:?}");
+        };
+        assert_eq!((recipient_channel, count), (5, 65536));
+    }
+
+    /// Builds an `SSH_MSG_CHANNEL_REQUEST` body for `type_name`.
+    fn channel_request_body(type_name: &str, want_reply: bool, tail: &[u8]) -> Vec<u8> {
+        let mut body = Vec::new();
+        body.extend_from_slice(&1u32.to_be_bytes());
+        body.extend_from_slice(&ssh_string(type_name.as_bytes()));
+        body.push(want_reply as u8);
+        body.extend_from_slice(tail);
+        body
+    }
+
+    #[test]
+    fn parse_channel_request_exit_status() {
+        let mut tail = Vec::new();
+        tail.extend_from_slice(&42u32.to_be_bytes());
+
+        let data = payload(
+            SSH_MSG_CHANNEL_REQUEST,
+            &channel_request_body("exit-status", true, &tail),
+        );
+        let msg = Message::parse(&data).unwrap();
+        let Message::ChannelExitStatus {
+            recipient_channel,
+            want_reply,
+            exit_status,
+        } = msg
+        else {
+            panic!("expected ChannelExitStatus, got {msg:?}");
+        };
+        assert_eq!(recipient_channel, 1);
+        assert!(want_reply);
+        assert_eq!(exit_status, 42);
+    }
+
+    #[test]
+    fn parse_channel_request_xon_xoff() {
+        let data = payload(
+            SSH_MSG_CHANNEL_REQUEST,
+            &channel_request_body("xon-xoff", false, &[1]),
+        );
+        let msg = Message::parse(&data).unwrap();
+        let Message::ChannelFlowControl {
+            recipient_channel,
+            want_reply,
+            on,
+        } = msg
+        else {
+            panic!("expected ChannelFlowControl, got {msg:?}");
+        };
+        assert_eq!(recipient_channel, 1);
+        assert!(!want_reply);
+        assert!(on);
+    }
+
+    #[test]
+    fn parse_channel_request_exit_signal() {
+        let mut tail = Vec::new();
+        tail.extend_from_slice(&ssh_string(b"TERM"));
+        tail.push(0); // core_dumped
+        tail.extend_from_slice(&ssh_string(b"killed"));
+        tail.extend_from_slice(&ssh_string(b"en"));
+
+        let data = payload(
+            SSH_MSG_CHANNEL_REQUEST,
+            &channel_request_body("exit-signal", true, &tail),
+        );
+        let msg = Message::parse(&data).unwrap();
+        let Message::ChannelExitSignal {
+            recipient_channel,
+            want_reply,
+            signal,
+            core_dumped,
+            error_message,
+            language,
+        } = msg
+        else {
+            panic!("expected ChannelExitSignal, got {msg:?}");
+        };
+        assert_eq!(recipient_channel, 1);
+        assert!(want_reply);
+        assert_eq!(signal, "TERM");
+        assert!(!core_dumped);
+        assert_eq!(error_message, "killed");
+        assert_eq!(language, "en");
+    }
+
+    #[test]
+    fn parse_channel_request_unknown_type() {
+        let data = payload(
+            SSH_MSG_CHANNEL_REQUEST,
+            &channel_request_body("shell", true, &[]),
+        );
+        let msg = Message::parse(&data).unwrap();
+        let Message::ChannelUnknownRequest {
+            recipient_channel,
+            want_reply,
+            r#type,
+        } = msg
+        else {
+            panic!("expected ChannelUnknownRequest, got {msg:?}");
+        };
+        assert_eq!(recipient_channel, 1);
+        assert!(want_reply);
+        assert_eq!(r#type, "shell");
+    }
+
+    #[test]
+    fn parse_channel_open_unknown_type() {
+        let mut body = Vec::new();
+        body.extend_from_slice(&ssh_string(b"bogus!"));
+        body.extend_from_slice(&9u32.to_be_bytes()); // sender_channel
+        body.extend_from_slice(&1u32.to_be_bytes());
+        body.extend_from_slice(&2u32.to_be_bytes());
+
+        let data = payload(SSH_MSG_CHANNEL_OPEN, &body);
+        let msg = Message::parse(&data).unwrap();
+        let Message::ChannelOpenUnknown {
+            sender_channel,
+            r#type,
+        } = msg
+        else {
+            panic!("expected ChannelOpenUnknown, got {msg:?}");
+        };
+        assert_eq!(sender_channel, 9);
+        assert_eq!(r#type, "bogus!");
+    }
+
+    #[test]
+    fn parse_channel_close_and_eof() {
+        let mut body = Vec::new();
+        body.extend_from_slice(&4u32.to_be_bytes());
+
+        let data = payload(SSH_MSG_CHANNEL_CLOSE, &body);
+        let msg = Message::parse(&data).unwrap();
+        assert!(matches!(
+            msg,
+            Message::ChannelClose {
+                recipient_channel: 4
+            }
+        ));
+
+        let data = payload(SSH_MSG_CHANNEL_EOF, &body);
+        let msg = Message::parse(&data).unwrap();
+        assert!(matches!(
+            msg,
+            Message::ChannelEof {
+                recipient_channel: 4
+            }
+        ));
+    }
+
+    #[test]
+    fn parse_channel_success_and_failure() {
+        let mut body = Vec::new();
+        body.extend_from_slice(&8u32.to_be_bytes());
+
+        let data = payload(SSH_MSG_CHANNEL_SUCCESS, &body);
+        let msg = Message::parse(&data).unwrap();
+        assert!(matches!(
+            msg,
+            Message::ChannelSuccess {
+                recipient_channel: 8
+            }
+        ));
+
+        let data = payload(SSH_MSG_CHANNEL_FAILURE, &body);
+        let msg = Message::parse(&data).unwrap();
+        assert!(matches!(
+            msg,
+            Message::ChannelFailure {
+                recipient_channel: 8
+            }
+        ));
+    }
+
+    #[test]
+    fn parse_request_success_and_failure_have_no_body() {
+        let data = payload(SSH_MSG_REQUEST_SUCCESS, &[]);
+        let msg = Message::parse(&data).unwrap();
+        assert!(matches!(msg, Message::RequestSuccess));
+
+        let data = payload(SSH_MSG_REQUEST_FAILURE, &[]);
+        let msg = Message::parse(&data).unwrap();
+        assert!(matches!(msg, Message::RequestFailure));
+    }
+
+    #[test]
+    fn parse_global_request_keepalive_and_unknown() {
+        let mut body = Vec::new();
+        body.extend_from_slice(&ssh_string(
+            openssh::SSH_GLOBAL_REQUEST_TYPE_KEEP_ALIVE.as_bytes(),
+        ));
+        body.push(1);
+
+        let data = payload(SSH_MSG_GLOBAL_REQUEST, &body);
+        let msg = Message::parse(&data).unwrap();
+        assert!(matches!(
+            msg,
+            Message::GlobalRequestKeepAliveOpenSSH { want_reply: true }
+        ));
+
+        let mut body = Vec::new();
+        let rtype = "tcpip-forward";
+        body.extend_from_slice(&ssh_string(rtype.as_bytes()));
+        body.push(0);
+
+        let data = payload(SSH_MSG_GLOBAL_REQUEST, &body);
+        let msg = Message::parse(&data).unwrap();
+        let Message::GlobalUnknownRequest { want_reply, r#type } = msg else {
+            panic!("expected GlobalUnknownRequest, got {msg:?}");
+        };
+        assert!(!want_reply);
+        assert_eq!(r#type, "tcpip-forward");
+    }
+
+    #[test]
+    fn parse_global_request_host_keys_collects_all_keys() {
+        let mut body = Vec::new();
+        body.extend_from_slice(&ssh_string(
+            openssh::SSH_GLOBAL_REQUEST_TYPE_HOST_KEYS.as_bytes(),
+        ));
+        body.push(1);
+        for key in [b"key-one".as_slice(), b"key-two"] {
+            body.extend_from_slice(&(key.len() as u32).to_be_bytes());
+            body.extend_from_slice(key);
+        }
+
+        let data = payload(SSH_MSG_GLOBAL_REQUEST, &body);
+        let msg = Message::parse(&data).unwrap();
+        let Message::GlobalRequestHostKeysOpenSSH {
+            want_reply,
+            host_keys,
+        } = msg
+        else {
+            panic!("expected GlobalRequestHostKeysOpenSSH, got {msg:?}");
+        };
+        assert!(want_reply);
+        assert_eq!(host_keys, vec![b"key-one".as_slice(), b"key-two"]);
+    }
+
+    #[test]
+    fn parse_ext_info_collects_extensions() {
+        let mut body = Vec::new();
+        body.extend_from_slice(&1u32.to_be_bytes());
+        body.extend_from_slice(&ssh_string(b"server-sig-algs"));
+        body.extend_from_slice(&ssh_string(b"ssh-ed25519"));
+
+        let data = payload(SSH_MSG_EXT_INFO, &body);
+        let msg = Message::parse(&data).unwrap();
+        let Message::ExtInfo { extensions } = msg else {
+            panic!("expected ExtInfo, got {msg:?}");
+        };
+        assert_eq!(extensions.len(), 1);
+        assert_eq!(extensions["server-sig-algs"], b"ssh-ed25519");
+    }
+
+    #[test]
+    fn parse_debug_and_unimplemented() {
+        let mut body = Vec::new();
+        body.push(0); // always_display = false
+        body.extend_from_slice(&ssh_string(b"db"));
+        body.extend_from_slice(&ssh_string(b""));
+
+        let data = payload(SSH_MSG_DEBUG, &body);
+        let msg = Message::parse(&data).unwrap();
+        let Message::Debug {
+            always_display,
+            message,
+            language,
+        } = msg
+        else {
+            panic!("expected Debug, got {msg:?}");
+        };
+        assert!(!always_display);
+        assert_eq!(message, "db");
+        assert_eq!(language, "");
+
+        let mut body = Vec::new();
+        body.extend_from_slice(&42u32.to_be_bytes());
+        let data = payload(SSH_MSG_UNIMPLEMENTED, &body);
+        let msg = Message::parse(&data).unwrap();
+        assert!(matches!(
+            msg,
+            Message::Unimplemented {
+                sequence_number: 42
+            }
+        ));
+    }
+
+    #[test]
+    fn parse_ping_and_pong() {
+        let mut body = Vec::new();
+        body.extend_from_slice(&ssh_string(b"ping"));
+
+        let data = payload(openssh::SSH_MSG_PING, &body);
+        let msg = Message::parse(&data).unwrap();
+        assert!(matches!(msg, Message::Ping { data } if data == b"ping"));
+
+        let data = payload(openssh::SSH_MSG_PONG, &body);
+        let msg = Message::parse(&data).unwrap();
+        assert!(matches!(msg, Message::Pong { data } if data == b"ping"));
+    }
+
+    #[test]
+    fn parse_unrecognized_code_falls_back() {
+        let data = payload(200, b"whatever");
+        let msg = Message::parse(&data).unwrap();
+        let Message::Unrecognized { code, data: rest } = msg else {
+            panic!("expected Unrecognized, got {msg:?}");
+        };
+        assert_eq!(code, 200);
+        assert_eq!(rest, &data[..]);
+    }
+
+    #[test]
+    fn parse_empty_buffer_fails() {
+        assert!(Message::parse(&[]).is_err());
+    }
+
+    #[test]
+    fn parse_non_utf8_string_fails() {
+        let mut body = Vec::new();
+        body.extend_from_slice(&1u32.to_be_bytes());
+        body.extend_from_slice(&[0xff, 0xfe]);
+
+        assert!(Message::parse(&payload(SSH_MSG_SERVICE_ACCEPT, &body)).is_err());
+    }
+
+    #[test]
+    fn packet_parse_splits_payload_and_padding() {
+        // layout: padding_len, payload, padding
+        let mut raw = vec![4u8];
+        raw.extend_from_slice(b"abcd");
+        raw.extend_from_slice(&[9, 9, 9, 9]);
+
+        let packet = Packet::parse(&raw).unwrap();
+        assert_eq!(packet.payload, b"abcd");
+        assert_eq!(packet.padding, [9, 9, 9, 9]);
+    }
+
+    /// KNOWN BUG (not yet fixed): `Packet::parse` computes
+    /// `payload_len = body_len - padding_len` *before* validating that
+    /// `padding_len` fits inside the body, so a malformed packet panics with
+    /// an arithmetic overflow in debug builds.
+    ///
+    /// Release builds wrap the subtraction and are saved only by the
+    /// subsequent `data.len() <= padding_len + 1` check, which is why this is
+    /// a panic rather than a wrong answer — but any peer can trigger it, so
+    /// the check should run before the subtraction.
+    ///
+    /// Run with `cargo test -- --ignored packet_parse_rejects_padding_longer_than_body`
+    /// to check whether it has been fixed.
+    #[test]
+    #[ignore = "known bug: Packet::parse underflows on padding_len > body"]
+    fn packet_parse_rejects_padding_longer_than_body() {
+        // padding_len (200) exceeds the remaining bytes
+        let raw = [200u8, 1, 2, 3];
+        assert!(Packet::parse(&raw).is_err());
+    }
+
+    #[test]
+    fn packet_parse_rejects_truncated_payload() {
+        // padding_len equals the whole body => payload would be empty/invalid
+        let raw = [3u8, 1, 2, 3];
+        assert!(Packet::parse(&raw).is_err());
+    }
+}

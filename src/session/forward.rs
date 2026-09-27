@@ -328,3 +328,98 @@ impl Stream {
         self.channel.send(data).await
     }
 }
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn socket_addr_formats_as_host_colon_port() {
+        assert_eq!(
+            SocketAddr::new("example.com".into(), 22).to_string(),
+            "example.com:22"
+        );
+        assert_eq!(
+            SocketAddr::new("127.0.0.1".into(), 8080).to_string(),
+            "127.0.0.1:8080"
+        );
+        // IPv6 literals are not bracketed: the SSH forwarding protocol
+        // carries host and port as separate fields, so this is only for
+        // display.
+        assert_eq!(SocketAddr::new("::1".into(), 22).to_string(), "::1:22");
+    }
+
+    #[test]
+    fn socket_addr_port_zero_is_allowed() {
+        // Port 0 asks the server to pick a free port when listening.
+        let addr = SocketAddr::new("localhost".into(), 0);
+        assert_eq!(addr.port, 0);
+        assert_eq!(addr.to_string(), "localhost:0");
+    }
+
+    #[test]
+    fn socket_addr_default_is_the_empty_wildcard() {
+        // The default (empty host, port 0) is what "every interface, any
+        // port" looks like on the wire.
+        let addr = SocketAddr::default();
+        assert_eq!(addr.host, ALL);
+        assert_eq!(addr.port, 0);
+        assert_eq!(addr.to_string(), ":0");
+    }
+
+    #[test]
+    fn socket_addr_equality_and_hashing_use_both_fields() {
+        use std::collections::HashSet;
+
+        let a = SocketAddr::new("localhost".into(), 22);
+        let b = SocketAddr::new("localhost".into(), 22);
+        let c = SocketAddr::new("localhost".into(), 2222);
+        let d = SocketAddr::new("127.0.0.1".into(), 22);
+
+        assert_eq!(a, b);
+        assert_ne!(a, c);
+        assert_ne!(a, d);
+
+        // Hashing must agree with equality so these can key a set.
+        let mut set = HashSet::new();
+        set.insert(a);
+        set.insert(b);
+        set.insert(c);
+        set.insert(d);
+        assert_eq!(set.len(), 3);
+    }
+
+    #[test]
+    fn socket_addr_is_usable_as_a_map_key() {
+        use std::collections::HashMap;
+
+        let mut map = HashMap::new();
+        map.insert(SocketAddr::new("localhost".into(), 8080), "forward-1");
+        assert_eq!(
+            map.get(&SocketAddr::new("localhost".into(), 8080)),
+            Some(&"forward-1")
+        );
+        assert_eq!(map.get(&SocketAddr::new("localhost".into(), 8081)), None);
+    }
+
+    #[test]
+    fn address_constants_hold_the_expected_values() {
+        assert_eq!(ALL, "");
+        assert_eq!(IPV4_ALL, "0.0.0.0");
+        assert_eq!(IPV6_ALL, "::");
+        assert_eq!(LOCALHOST, "localhost");
+        assert_eq!(IPV4_LOCALHOST, "127.0.0.1");
+        assert_eq!(IPV6_LOCALHOST, "::1");
+    }
+
+    #[test]
+    fn wildcard_and_loopback_constants_are_distinct() {
+        // The three wildcard spellings must not collide, nor the loopbacks.
+        assert_ne!(ALL, IPV4_ALL);
+        assert_ne!(ALL, IPV6_ALL);
+        assert_ne!(IPV4_ALL, IPV6_ALL);
+        assert_ne!(LOCALHOST, IPV4_LOCALHOST);
+        assert_ne!(LOCALHOST, IPV6_LOCALHOST);
+        assert_ne!(IPV4_LOCALHOST, IPV6_LOCALHOST);
+    }
+}

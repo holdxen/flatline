@@ -897,8 +897,9 @@ mod test {
     use crate::test::{Config as TestHandle, ShuffleConfig};
 
     #[tokio::test]
+    #[ignore = "requires a live SSH server configured in Test.toml"]
     async fn test_authenticate_keyboard_interactive() -> anyhow::Result<()> {
-        tracing_subscriber::fmt().init();
+        let _ = tracing_subscriber::fmt().try_init();
 
         let handle = TestHandle::load().await?;
 
@@ -942,6 +943,7 @@ mod test {
     }
 
     #[tokio::test]
+    #[ignore = "requires a live SSH server configured in Test.toml"]
     async fn test_authenticate_public_key() -> anyhow::Result<()> {
         let home = std::env::home_dir().unwrap();
 
@@ -975,6 +977,7 @@ mod test {
     }
 
     #[tokio::test]
+    #[ignore = "requires a live SSH server configured in Test.toml"]
     async fn test_authenticate_certificate() -> anyhow::Result<()> {
         let home = std::env::home_dir().unwrap();
 
@@ -1008,8 +1011,9 @@ mod test {
     }
 
     #[tokio::test]
+    #[ignore = "requires a live SSH server configured in Test.toml"]
     async fn test_renegotiate() -> anyhow::Result<()> {
-        tracing_subscriber::fmt::init();
+        let _ = tracing_subscriber::fmt::try_init();
         let handle = TestHandle::load().await?;
         let session = handle.open_session_simple().await?;
         session
@@ -1029,8 +1033,9 @@ mod test {
     }
 
     #[tokio::test]
+    #[ignore = "requires a live SSH server configured in Test.toml"]
     async fn test_handshake() -> anyhow::Result<()> {
-        tracing_subscriber::fmt::init();
+        let _ = tracing_subscriber::fmt::try_init();
 
         for _ in 0..999 {
             let mut config = Config::default();
@@ -1060,6 +1065,7 @@ mod test {
     }
 
     #[tokio::test]
+    #[ignore = "requires a live SSH server configured in Test.toml"]
     async fn test_authenticate_password() -> anyhow::Result<()> {
         let session = open_session_simple().await?;
         session
@@ -1069,6 +1075,7 @@ mod test {
     }
 
     #[tokio::test]
+    #[ignore = "requires a live SSH server configured in Test.toml"]
     async fn test_open_channel() -> anyhow::Result<()> {
         let session = open_session_simple().await?;
 
@@ -1081,5 +1088,166 @@ mod test {
             .await?;
 
         Ok(())
+    }
+
+    // ------------------------------------------------------------------
+    // Offline tests: no server, no sockets.
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn authentication_method_wire_names_round_trip() {
+        let pairs = [
+            (AuthenticationMethod::None, "none"),
+            (AuthenticationMethod::PublicKey, "publickey"),
+            (AuthenticationMethod::Password, "password"),
+            (AuthenticationMethod::HostBased, "hostbased"),
+            (
+                AuthenticationMethod::KeyboardInteractive,
+                "keyboard-interactive",
+            ),
+            (AuthenticationMethod::GssapiWithMIC, "gssapi-with-mic"),
+            (AuthenticationMethod::GssapiKeyExchange, "gssapi-keyex"),
+            (AuthenticationMethod::Gssapi, "gssapi"),
+            (AuthenticationMethod::ExternalKeyExchange, "external-keyx"),
+        ];
+
+        for (method, wire) in pairs {
+            assert_eq!(method.as_ref(), wire, "AsRef of {method:?}");
+            assert_eq!(method.to_string(), wire, "ToString of {method:?}");
+            // Parsing the wire name must give back the same variant.
+            assert_eq!(AuthenticationMethod::from(wire), method, "From {wire:?}");
+        }
+    }
+
+    #[test]
+    fn authentication_method_round_trips_through_from_and_as_ref() {
+        for wire in ["none", "publickey", "password", "keyboard-interactive"] {
+            let method = AuthenticationMethod::from(wire);
+            assert_eq!(method.as_ref(), wire);
+        }
+    }
+
+    #[test]
+    fn unknown_authentication_method_is_preserved_verbatim() {
+        let method = AuthenticationMethod::from("vendor-specific-method");
+        assert_eq!(
+            method,
+            AuthenticationMethod::Unknown("vendor-specific-method".to_string())
+        );
+        // The unknown name survives a trip through AsRef/ToString so it can
+        // still be forwarded to the server unchanged.
+        assert_eq!(method.as_ref(), "vendor-specific-method");
+        assert_eq!(method.to_string(), "vendor-specific-method");
+
+        // Anything else maps to Unknown too, including the empty string.
+        assert_eq!(
+            AuthenticationMethod::from(""),
+            AuthenticationMethod::Unknown(String::new())
+        );
+    }
+
+    #[test]
+    fn authentication_method_ordering_and_equality_work() {
+        // The enum derives Eq/Ord/Hash so it can key a set of offered
+        // methods; None must sort first because it is declared first.
+        assert_eq!(AuthenticationMethod::None, AuthenticationMethod::None);
+        assert!(AuthenticationMethod::None < AuthenticationMethod::Password);
+        assert_ne!(
+            AuthenticationMethod::Password,
+            AuthenticationMethod::PublicKey
+        );
+        assert_ne!(
+            AuthenticationMethod::Unknown("a".into()),
+            AuthenticationMethod::Unknown("b".into())
+        );
+    }
+
+    #[test]
+    fn interactive_method_wire_names() {
+        assert_eq!(InteractiveMethod::PAM.as_ref(), "pam");
+        assert_eq!(InteractiveMethod::BSD.as_ref(), "bsdauth");
+        assert_eq!(InteractiveMethod::Other("skey".into()).as_ref(), "skey");
+    }
+
+    #[test]
+    fn authenticate_result_success_only_for_success() {
+        assert!(AuthenticateResult::Success.success());
+        assert!(!AuthenticateResult::PasswordChangeRequired.success());
+        assert!(
+            !AuthenticateResult::Failure {
+                allow_methods: vec![AuthenticationMethod::Password],
+                partial_success: false,
+            }
+            .success()
+        );
+        assert!(
+            !AuthenticateResult::Failure {
+                allow_methods: vec![],
+                partial_success: true,
+            }
+            .success()
+        );
+    }
+
+    #[test]
+    fn authenticate_result_failure_keeps_methods_and_partial_flag() {
+        let result = AuthenticateResult::Failure {
+            allow_methods: vec![
+                AuthenticationMethod::PublicKey,
+                AuthenticationMethod::KeyboardInteractive,
+            ],
+            partial_success: true,
+        };
+
+        let AuthenticateResult::Failure {
+            allow_methods,
+            partial_success,
+        } = &result
+        else {
+            panic!("expected Failure, got {result:?}");
+        };
+
+        assert_eq!(
+            allow_methods,
+            &vec![
+                AuthenticationMethod::PublicKey,
+                AuthenticationMethod::KeyboardInteractive
+            ]
+        );
+        assert!(*partial_success);
+    }
+
+    #[test]
+    fn default_window_and_packet_sizes_match_the_documented_values() {
+        // Documented as 2 MiB and 32 KiB.
+        assert_eq!(Session::DEFAULT_INITIAL_WINDOW_SIZE, 2 * 1024 * 1024);
+        assert_eq!(Session::DEFAULT_MAXIMUM_PACKET_SIZE, 32 * 1024);
+    }
+
+    #[test]
+    fn session_error_variants_round_trip_through_display() {
+        let err = Error::Disconnected {
+            reason: DisconnectReason::BY_APPLICATION,
+            description: "bye".into(),
+        };
+        let text = err.to_string();
+        assert!(text.contains("bye"), "description missing from: {text}");
+        assert!(
+            text.contains("BY_APPLICATION") || text.contains("11"),
+            "reason code missing from: {text}"
+        );
+
+        let err = Error::UnexpectedService {
+            expect: "ssh-connection".into(),
+            actual: "ssh-userauth".into(),
+        };
+        let text = err.to_string();
+        assert!(text.contains("ssh-connection"), "got: {text}");
+        assert!(text.contains("ssh-userauth"), "got: {text}");
+
+        let err = Error::UnexpectedMessage {
+            detail: "window adjust out of order".into(),
+        };
+        assert!(err.to_string().contains("window adjust out of order"));
     }
 }

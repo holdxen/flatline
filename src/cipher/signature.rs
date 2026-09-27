@@ -732,3 +732,178 @@ impl Verify for Ecdsa<Public> {
         ctx.verify(&hash, &signature).context(builder::OpenSSL)
     }
 }
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    /// Builds an SSH key blob: `string algorithm` + `string key material`.
+    fn key_blob(algorithm: &str, material: &[u8]) -> Vec<u8> {
+        let mut out = (algorithm.len() as u32).to_be_bytes().to_vec();
+        out.extend_from_slice(algorithm.as_bytes());
+        out.extend_from_slice(&(material.len() as u32).to_be_bytes());
+        out.extend_from_slice(material);
+        out
+    }
+
+    /// Wraps raw signature bytes in the on-wire SSH signature blob.
+    fn signature_blob(algorithm: &str, raw: &[u8]) -> Vec<u8> {
+        key_blob(algorithm, raw)
+    }
+
+    fn signer(name: &str) -> Box<dyn Signature + Send> {
+        new_signature_by_name(name).expect("unknown signature algorithm")()
+    }
+
+    fn verifier(name: &str) -> Box<dyn Verify + Send> {
+        new_verify_by_name(name).expect("unknown verify algorithm")()
+    }
+
+    /// A fresh ed25519 key pair as `(private_blob, public_blob)`.
+    fn ed25519_key_pair() -> (Vec<u8>, Vec<u8>) {
+        let key = PKey::generate_ed25519().expect("keygen failed");
+        let private = key.raw_private_key().expect("raw private key");
+        let public = key.raw_public_key().expect("raw public key");
+        (
+            key_blob("ssh-ed25519", &private),
+            key_blob("ssh-ed25519", &public),
+        )
+    }
+
+    #[test]
+    fn ed25519_signature_verifies() {
+        let (private, public) = ed25519_key_pair();
+        let message = b"the exchange hash to sign";
+
+        let mut s = signer("ssh-ed25519");
+        s.initialize(&private).expect("load private key");
+        let raw = s.signature(message).expect("sign failed");
+        assert_eq!(raw.len(), 64, "ed25519 signatures are 64 bytes");
+
+        let mut v = verifier("ssh-ed25519");
+        v.initialize(&public).expect("load public key");
+        let blob = signature_blob("ssh-ed25519", &raw);
+        assert!(v.verify(&blob, message).expect("verify failed"));
+    }
+
+    #[test]
+    fn ed25519_rejects_a_modified_message() {
+        let (private, public) = ed25519_key_pair();
+
+        let mut s = signer("ssh-ed25519");
+        s.initialize(&private).unwrap();
+        let raw = s.signature(b"original message").unwrap();
+
+        let mut v = verifier("ssh-ed25519");
+        v.initialize(&public).unwrap();
+        let blob = signature_blob("ssh-ed25519", &raw);
+        assert!(!v.verify(&blob, b"modified message").expect("verify ran"));
+    }
+
+    #[test]
+    fn ed25519_rejects_a_modified_signature() {
+        let (private, public) = ed25519_key_pair();
+
+        let mut s = signer("ssh-ed25519");
+        s.initialize(&private).unwrap();
+        let mut raw = s.signature(b"message").unwrap();
+        raw[0] ^= 0xff;
+
+        let mut v = verifier("ssh-ed25519");
+        v.initialize(&public).unwrap();
+        let blob = signature_blob("ssh-ed25519", &raw);
+        assert!(!v.verify(&blob, b"message").expect("verify ran"));
+    }
+
+    #[test]
+    fn ed25519_signature_does_not_verify_under_another_key() {
+        let (private, _) = ed25519_key_pair();
+        let (_, other_public) = ed25519_key_pair();
+
+        let mut s = signer("ssh-ed25519");
+        s.initialize(&private).unwrap();
+        let raw = s.signature(b"message").unwrap();
+
+        let mut v = verifier("ssh-ed25519");
+        v.initialize(&other_public).unwrap();
+        let blob = signature_blob("ssh-ed25519", &raw);
+        assert!(!v.verify(&blob, b"message").expect("verify ran"));
+    }
+
+    #[test]
+    fn signature_blob_for_the_wrong_algorithm_is_refused() {
+        let (private, public) = ed25519_key_pair();
+
+        let mut s = signer("ssh-ed25519");
+        s.initialize(&private).unwrap();
+        let raw = s.signature(b"message").unwrap();
+
+        let mut v = verifier("ssh-ed25519");
+        v.initialize(&public).unwrap();
+        // Claim the signature is rsa-sha2-256.
+        let blob = signature_blob("rsa-sha2-256", &raw);
+        assert!(!v.verify(&blob, b"message").expect("verify ran"));
+    }
+
+    #[test]
+    fn loading_a_key_of_the_wrong_type_is_rejected() {
+        let (private, _) = ed25519_key_pair();
+
+        let mut s = signer("rsa-sha2-256");
+        let err = s.initialize(&private).expect_err("type mismatch must fail");
+        assert!(
+            err.to_string().to_lowercase().contains("mismatch")
+                || err.to_string().contains("Mismatch"),
+            "expected a mismatch error, got: {err}"
+        );
+
+        let mut v = verifier("rsa-sha2-256");
+        assert!(v.initialize(&private).is_err());
+    }
+
+    #[test]
+    fn using_a_signer_before_loading_a_key_fails() {
+        let mut s = signer("ssh-ed25519");
+        let err = s.signature(b"message").expect_err("no key loaded");
+        assert!(
+            err.to_string().contains("Uninitialize") || err.to_string().contains("operation"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn using_a_verifier_before_loading_a_key_fails() {
+        // The blob must carry the right algorithm name, otherwise `verify`
+        // short-circuits to `Ok(false)` before touching the key.
+        let mut v = verifier("ssh-ed25519");
+        let blob = signature_blob("ssh-ed25519", &[0u8; 64]);
+        assert!(v.verify(&blob, b"message").is_err());
+    }
+
+    #[test]
+    fn a_blob_with_a_foreign_algorithm_name_reports_false_not_an_error() {
+        // Same shape as above but claiming rsa-sha2-256: this path returns
+        // Ok(false) rather than an error, so callers must only accept
+        // `Ok(true)` as success.
+        let mut v = verifier("ssh-ed25519");
+        let blob = signature_blob("rsa-sha2-256", &[0u8; 64]);
+        assert!(v.verify(&blob, b"message").is_ok_and(|ok| !ok));
+    }
+
+    #[test]
+    fn signature_algorithms_report_their_registered_name() {
+        for name in signature_all() {
+            assert_eq!(signer(name).name(), *name);
+        }
+        for name in verify_all() {
+            assert_eq!(verifier(name).name(), *name);
+        }
+    }
+
+    #[test]
+    fn signature_and_verify_registries_agree() {
+        // Anything that can sign must have a matching verifier and vice
+        // versa, or negotiation could pick an unusable pair.
+        assert_eq!(signature_all(), verify_all());
+    }
+}

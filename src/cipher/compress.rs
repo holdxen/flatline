@@ -295,3 +295,121 @@ impl Decode for ZDecoder {
         self.name
     }
 }
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    fn encoder(name: &str) -> Box<dyn Encode + Send> {
+        new_encode_by_name(name).expect("unknown encoder")()
+    }
+
+    fn decoder(name: &str) -> Box<dyn Decode + Send> {
+        new_decode_by_name(name).expect("unknown decoder")()
+    }
+
+    /// Compresses one packet payload and returns the wire bytes.
+    fn compress(name: &str, payload: &[u8]) -> Vec<u8> {
+        let mut enc = encoder(name);
+        enc.update(payload).expect("update failed");
+        enc.finalize().expect("finalize failed")
+    }
+
+    #[test]
+    fn none_passes_payload_through_unchanged() {
+        let payload = b"the quick brown fox jumps over the lazy dog".repeat(10);
+        assert_eq!(compress("none", &payload), payload);
+    }
+
+    #[test]
+    fn zlib_alters_the_bytes_it_emits() {
+        let payload = b"the quick brown fox jumps over the lazy dog".repeat(10);
+        assert_ne!(compress("zlib", &payload), payload);
+    }
+
+    #[test]
+    fn none_reports_its_name_and_no_auth_compression() {
+        assert_eq!(encoder("none").name(), "none");
+        assert_eq!(decoder("none").name(), "none");
+        assert!(!encoder("none").compress_in_authentication());
+        assert!(!decoder("none").compress_in_authentication());
+    }
+
+    #[test]
+    fn delayed_compression_flag_matches_openssh_semantics() {
+        // Plain zlib compresses during authentication; OpenSSH's variant
+        // waits until authentication has finished.
+        assert!(encoder("zlib").compress_in_authentication());
+        assert!(decoder("zlib").compress_in_authentication());
+        assert!(!encoder("zlib@openssh.com").compress_in_authentication());
+        assert!(!decoder("zlib@openssh.com").compress_in_authentication());
+    }
+
+    #[test]
+    fn zlib_round_trips_a_payload() {
+        let payload: Vec<u8> = (0..4096u32).map(|v| (v % 251) as u8).collect();
+
+        let compressed = compress("zlib", &payload);
+        let mut dec = decoder("zlib");
+        dec.update(&compressed).expect("update failed");
+        let out = dec.finalize().expect("finalize failed");
+
+        assert_eq!(out, payload);
+    }
+
+    #[test]
+    fn zlib_repeatedly_compresses_to_smaller_output() {
+        let payload = vec![b'a'; 8192];
+        let compressed = compress("zlib", &payload);
+        assert!(
+            compressed.len() < payload.len() / 8,
+            "expected strong compression, got {} -> {}",
+            payload.len(),
+            compressed.len()
+        );
+    }
+
+    #[test]
+    fn zlib_state_is_kept_across_packets() {
+        let mut enc = encoder("zlib");
+        let mut dec = decoder("zlib");
+
+        for chunk in [b"first packet".as_slice(), b"second packet", b"third"] {
+            enc.update(chunk).unwrap();
+            let wire = enc.finalize().unwrap();
+
+            dec.update(&wire).unwrap();
+            let out = dec.finalize().unwrap();
+            assert_eq!(out, chunk);
+        }
+    }
+
+    #[test]
+    fn zlib_decode_of_garbage_errors() {
+        let mut dec = decoder("zlib");
+        // Not a zlib stream at all.
+        let result = dec.update(&[0xde, 0xad, 0xbe, 0xef]);
+        let failed = result.is_err() || dec.finalize().is_err();
+        assert!(failed, "expected an error decoding garbage");
+    }
+
+    #[test]
+    fn finalize_clears_the_pending_buffer() {
+        let mut enc = encoder("none");
+        enc.update(b"abc").unwrap();
+        assert_eq!(enc.finalize().unwrap(), b"abc");
+        // Second finalize with no intervening update yields nothing.
+        assert!(enc.finalize().unwrap().is_empty());
+    }
+
+    #[test]
+    fn encoders_and_decoders_agree_on_names() {
+        for name in encode_all() {
+            assert_eq!(encoder(name).name(), *name);
+        }
+        for name in decode_all() {
+            assert_eq!(decoder(name).name(), *name);
+        }
+        assert_eq!(encode_all(), decode_all());
+    }
+}

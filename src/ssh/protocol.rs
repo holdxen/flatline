@@ -324,3 +324,345 @@ pub mod sftp {
     pub const OPENSSH_SFTP_EXT_USERS_GROUPS_BY_ID: SFTPExtension =
         SFTPExtension::new("users-groups-by-id@openssh.com", b"1");
 }
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn transport_messages_sit_in_their_rfc_range() {
+        // RFC 4253 section 6: 1..=6 are generic transport messages.
+        for code in [
+            SSH_MSG_DISCONNECT,
+            SSH_MSG_IGNORE,
+            SSH_MSG_UNIMPLEMENTED,
+            SSH_MSG_DEBUG,
+            SSH_MSG_SERVICE_REQUEST,
+            SSH_MSG_SERVICE_ACCEPT,
+        ] {
+            assert!((1..=6).contains(&code), "out of range: {code}");
+        }
+        assert_eq!(SSH_MSG_EXT_INFO, 7, "RFC 8308");
+
+        // 20/21 are negotiation and key activation.
+        assert_eq!(SSH_MSG_KEXINIT, 20);
+        assert_eq!(SSH_MSG_NEWKEYS, 21);
+    }
+
+    #[test]
+    fn method_specific_messages_reuse_their_documented_numbers() {
+        // Both KEXDH and GEX start at 30/31 (RFC 4253 §8, RFC 4419).
+        assert_eq!(SSH_MSG_KEXDH_INIT, SSH_MSG_KEX_DH_GEX_REQUEST_OLD);
+        assert_eq!(SSH_MSG_KEXDH_REPLY, SSH_MSG_KEX_DH_GEX_GROUP);
+        assert_eq!(SSH_MSG_KEX_ECDH_INIT, SSH_MSG_KEXDH_INIT);
+        assert_eq!(SSH_MSG_KEX_ECDH_REPLY, SSH_MSG_KEXDH_REPLY);
+
+        assert_eq!(SSH_MSG_KEX_DH_GEX_INIT, 32);
+        assert_eq!(SSH_MSG_KEX_DH_GEX_REPLY, 33);
+        assert_eq!(SSH_MSG_KEX_DH_GEX_REQUEST, 34);
+    }
+
+    #[test]
+    fn userauth_messages_sit_in_their_rfc_range() {
+        for code in [
+            SSH_MSG_USERAUTH_REQUEST,
+            SSH_MSG_USERAUTH_FAILURE,
+            SSH_MSG_USERAUTH_SUCCESS,
+            SSH_MSG_USERAUTH_BANNER,
+        ] {
+            assert!((50..=53).contains(&code), "out of range: {code}");
+        }
+
+        // 60 is shared by three different method-specific messages.
+        assert_eq!(SSH_MSG_USERAUTH_PK_OK, 60);
+        assert_eq!(SSH_MSG_USERAUTH_PASSWD_CHANGEREQ, 60);
+        assert_eq!(SSH_MSG_USERAUTH_INFO_REQUEST, 60);
+        assert_eq!(SSH_MSG_USERAUTH_INFO_RESPONSE, 61);
+    }
+
+    #[test]
+    fn connection_messages_sit_in_their_rfc_range() {
+        for code in [
+            SSH_MSG_GLOBAL_REQUEST,
+            SSH_MSG_REQUEST_SUCCESS,
+            SSH_MSG_REQUEST_FAILURE,
+        ] {
+            assert!((80..=82).contains(&code), "out of range: {code}");
+        }
+
+        // Channel messages run 90..=100 and are strictly increasing, so
+        // matching on the code is unambiguous.
+        let channel_codes = [
+            SSH_MSG_CHANNEL_OPEN,
+            SSH_MSG_CHANNEL_OPEN_CONFIRMATION,
+            SSH_MSG_CHANNEL_OPEN_FAILURE,
+            SSH_MSG_CHANNEL_WINDOW_ADJUST,
+            SSH_MSG_CHANNEL_DATA,
+            SSH_MSG_CHANNEL_EXTENDED_DATA,
+            SSH_MSG_CHANNEL_EOF,
+            SSH_MSG_CHANNEL_CLOSE,
+            SSH_MSG_CHANNEL_REQUEST,
+            SSH_MSG_CHANNEL_SUCCESS,
+            SSH_MSG_CHANNEL_FAILURE,
+        ];
+        for window in channel_codes.windows(2) {
+            assert_eq!(window[1], window[0] + 1, "channel codes must be contiguous");
+        }
+        assert_eq!(channel_codes[0], 90);
+        assert_eq!(*channel_codes.last().unwrap(), 100);
+    }
+
+    #[test]
+    fn disconnect_reason_codes_match_rfc_4250() {
+        assert_eq!(SSH_DISCONNECT_HOST_NOT_ALLOWED_TO_CONNECT, 1);
+        assert_eq!(SSH_DISCONNECT_PROTOCOL_ERROR, 2);
+        assert_eq!(SSH_DISCONNECT_KEY_EXCHANGE_FAILED, 3);
+        assert_eq!(SSH_DISCONNECT_MAC_ERROR, 5);
+        assert_eq!(SSH_DISCONNECT_BY_APPLICATION, 11);
+        assert_eq!(SSH_DISCONNECT_NO_MORE_AUTH_METHODS_AVAILABLE, 14);
+        assert_eq!(SSH_DISCONNECT_ILLEGAL_USER_NAME, 15);
+
+        // Contiguous 1..=15.
+        assert_eq!(SSH_DISCONNECT_ILLEGAL_USER_NAME, 15);
+    }
+
+    #[test]
+    fn channel_open_failure_codes_match_rfc_4254() {
+        assert_eq!(SSH_OPEN_ADMINISTRATIVELY_PROHIBITED, 1);
+        assert_eq!(SSH_OPEN_CONNECT_FAILED, 2);
+        assert_eq!(SSH_OPEN_UNKNOWN_CHANNEL_TYPE, 3);
+        assert_eq!(SSH_OPEN_RESOURCE_SHORTAGE, 4);
+    }
+
+    #[test]
+    fn extended_data_stderr_is_the_only_defined_type() {
+        assert_eq!(SSH_EXTENDED_DATA_STDERR, 1);
+    }
+
+    #[test]
+    fn packet_size_limits_are_sane() {
+        // RFC 4253: every implementation must support 32768-byte payloads.
+        assert_eq!(MAX_PACKET_PAYLOAD_LENGTH, 32768);
+        assert!(MAX_PACKET_LENGTH > MAX_PACKET_PAYLOAD_LENGTH);
+        assert!(MIN_PADDING_LENGTH >= 4, "RFC 4253 requires at least 4");
+        assert_eq!(BANNER_MAX, 255, "RFC 4253 caps the banner at 255 bytes");
+        assert_eq!(BANNER_ENDING, "\r\n");
+    }
+
+    #[test]
+    fn strict_kex_and_ext_info_marker_names_match_openssh() {
+        assert_eq!(KEX_STRICT_CLIENT, "kex-strict-c-v00@openssh.com");
+        assert_eq!(KEX_STRICT_SERVER, "kex-strict-s-v00@openssh.com");
+        assert_eq!(EXT_INFO_CLIENT, "ext-info-c");
+        assert_eq!(EXT_INFO_SERVER, "ext-info-s");
+
+        // The client and server markers must differ, or a peer's marker
+        // would be mistaken for our own.
+        assert_ne!(KEX_STRICT_CLIENT, KEX_STRICT_SERVER);
+        assert_ne!(EXT_INFO_CLIENT, EXT_INFO_SERVER);
+    }
+
+    #[test]
+    fn service_and_extension_names_match_the_specifications() {
+        assert_eq!(SSH_SERVICE_NAME_USER_AUTHENTICATION_SERVICE, "ssh-userauth");
+        assert_eq!(
+            SSH_EXTENSION_NAME_SERVER_SIGNATURE_ALGORITHMS,
+            "server-sig-algs"
+        );
+    }
+
+    #[test]
+    fn channel_and_forwarding_type_names_match_openssh() {
+        assert_eq!(SSH_CHANNEL_TYPE_SESSION, "session");
+        assert_eq!(SSH_CHANNEL_TYPE_DIRECT_TCP_IP, "direct-tcpip");
+        assert_eq!(SSH_CHANNEL_TYPE_X11, "x11");
+        assert_eq!(SSH_CHANNEL_TYPE_FORWARDED_TCP_IP, "forwarded-tcpip");
+        assert_eq!(SSH_GLOBAL_REQUEST_TYPE_TCP_IP_FORWARD, "tcpip-forward");
+        assert_eq!(
+            SSH_GLOBAL_REQUEST_TYPE_CANCEL_TCP_IP_FORWARD,
+            "cancel-tcpip-forward"
+        );
+    }
+
+    #[test]
+    fn openssh_extension_names_are_namespaced() {
+        use openssh::*;
+        // Every OpenSSH-specific name carries the @openssh.com suffix (or
+        // the vendor prefix), which is what distinguishes them from
+        // standardized names.
+        assert_eq!(SSH_GLOBAL_REQUEST_TYPE_KEEP_ALIVE, "keepalive@openssh.com");
+        assert_eq!(SSH_GLOBAL_REQUEST_TYPE_HOST_KEYS, "hostkeys-00@openssh.com");
+        assert_eq!(SSH_EXTENSION_NAME_PING, "ping@openssh.com");
+        assert_eq!(SSH_CHANNEL_TYPE_AGENT_CONNECT, "auth-agent@openssh.com");
+        assert_eq!(
+            SSH_CHANNEL_TYPE_FORWARDED_STREAM_LOCAL,
+            "forwarded-streamlocal@openssh.com"
+        );
+        assert_eq!(DIRECT_STREM_LOCAL, "direct-streamlocal@openssh.com");
+        assert_eq!(STREAM_LOCAL_FORWARD, "streamlocal-forward@openssh.com");
+        assert_eq!(
+            CANCEL_STREAM_LOCAL_FORWARD,
+            "cancel-streamlocal-forward@openssh.com"
+        );
+    }
+
+    #[test]
+    fn openssh_pings_sit_above_the_standard_message_range() {
+        // OpenSSH uses 192/193 for ping/pong, clear of RFC-defined codes.
+        assert_eq!(openssh::SSH_MSG_PING, 192);
+        assert_eq!(openssh::SSH_MSG_PONG, 193);
+        assert!(openssh::SSH_MSG_PING > 100);
+        assert_ne!(openssh::SSH_MSG_PING, openssh::SSH_MSG_PONG);
+    }
+
+    #[test]
+    fn sftp_version_is_three() {
+        assert_eq!(sftp::VERSION, 3);
+    }
+
+    #[test]
+    fn sftp_request_codes_are_contiguous_and_replies_are_separate() {
+        // Requests run 1..=20 in declaration order...
+        let requests = [
+            sftp::SSH_FXP_INIT,
+            sftp::SSH_FXP_VERSION,
+            sftp::SSH_FXP_OPEN,
+            sftp::SSH_FXP_CLOSE,
+            sftp::SSH_FXP_READ,
+            sftp::SSH_FXP_WRITE,
+            sftp::SSH_FXP_LSTAT,
+            sftp::SSH_FXP_FSTAT,
+            sftp::SSH_FXP_SETSTAT,
+            sftp::SSH_FXP_FSETSTAT,
+            sftp::SSH_FXP_OPENDIR,
+            sftp::SSH_FXP_READDIR,
+            sftp::SSH_FXP_REMOVE,
+            sftp::SSH_FXP_MKDIR,
+            sftp::SSH_FXP_RMDIR,
+            sftp::SSH_FXP_REALPATH,
+            sftp::SSH_FXP_STAT,
+            sftp::SSH_FXP_RENAME,
+            sftp::SSH_FXP_READLINK,
+            sftp::SSH_FXP_SYMLINK,
+        ];
+        for (i, code) in requests.iter().enumerate() {
+            assert_eq!(*code, i as u8 + 1, "request codes must be 1..=20");
+        }
+
+        // ...and replies start at 101 so they can never be confused.
+        assert_eq!(sftp::SSH_FXP_STATUS, 101);
+        assert_eq!(sftp::SSH_FXP_HANDLE, 102);
+        assert_eq!(sftp::SSH_FXP_DATA, 103);
+        assert_eq!(sftp::SSH_FXP_NAME, 104);
+        assert_eq!(sftp::SSH_FXP_ATTRS, 105);
+
+        assert_eq!(sftp::SSH_FXP_EXTENDED, 200);
+        assert_eq!(sftp::SSH_FXP_EXTENDED_REPLY, 201);
+    }
+
+    #[test]
+    fn sftp_open_flags_are_distinct_bits() {
+        let flags = [
+            sftp::SSH_FXF_READ,
+            sftp::SSH_FXF_WRITE,
+            sftp::SSH_FXF_APPEND,
+            sftp::SSH_FXF_CREAT,
+            sftp::SSH_FXF_TRUNC,
+            sftp::SSH_FXF_EXCL,
+        ];
+
+        // Powers of two, so they can be OR-ed together.
+        for flag in flags {
+            assert!(flag.is_power_of_two(), "{flag:#x} is not a single bit");
+        }
+        // No duplicates.
+        let unique: std::collections::HashSet<_> = flags.iter().collect();
+        assert_eq!(unique.len(), flags.len());
+    }
+
+    #[test]
+    fn sftp_attribute_flags_are_distinct_bits() {
+        let flags = [
+            sftp::SSH_FILEXFER_ATTR_SIZE,
+            sftp::SSH_FILEXFER_ATTR_UIDGID,
+            sftp::SSH_FILEXFER_ATTR_PERMISSIONS,
+            sftp::SSH_FILEXFER_ATTR_ACMODTIME,
+            sftp::SSH_FILEXFER_ATTR_EXTENDED,
+        ];
+        for flag in flags {
+            assert!(flag.is_power_of_two(), "{flag:#x} is not a single bit");
+        }
+        let unique: std::collections::HashSet<_> = flags.iter().collect();
+        assert_eq!(unique.len(), flags.len());
+    }
+
+    #[test]
+    fn sftp_status_codes_match_the_draft() {
+        assert_eq!(sftp::SSH_FX_OK, 0);
+        assert_eq!(sftp::SSH_FX_EOF, 1);
+        assert_eq!(sftp::SSH_FX_NO_SUCH_FILE, 2);
+        assert_eq!(sftp::SSH_FX_PERMISSION_DENIED, 3);
+        assert_eq!(sftp::SSH_FX_FAILURE, 4);
+        assert_eq!(sftp::SSH_FX_BAD_MESSAGE, 5);
+        assert_eq!(sftp::SSH_FX_NO_CONNECTION, 6);
+        assert_eq!(sftp::SSH_FX_CONNECTION_LOST, 7);
+        assert_eq!(sftp::SSH_FX_OP_UNSUPPORTED, 8);
+    }
+
+    #[test]
+    fn sftp_extension_constants_carry_version_and_name() {
+        let cases = [
+            (
+                sftp::OPENSSH_SFTP_EXT_POSIX_RENAME,
+                "posix-rename@openssh.com",
+                b"1",
+            ),
+            (sftp::OPENSSH_SFTP_EXT_STATVFS, "statvfs@openssh.com", b"2"),
+            (
+                sftp::OPENSSH_SFTP_EXT_FSTATVFS,
+                "fstatvfs@openssh.com",
+                b"2",
+            ),
+            (
+                sftp::OPENSSH_SFTP_EXT_HARDLINK,
+                "hardlink@openssh.com",
+                b"1",
+            ),
+            (sftp::OPENSSH_SFTP_EXT_FSYNC, "fsync@openssh.com", b"1"),
+            (
+                sftp::OPENSSH_SFTP_EXT_LSETSTAT,
+                "lsetstat@openssh.com",
+                b"1",
+            ),
+            (sftp::OPENSSH_SFTP_EXT_LIMITS, "limits@openssh.com", b"1"),
+            (
+                sftp::OPENSSH_SFTP_EXT_EXPAND_PATH,
+                "expand-path@openssh.com",
+                b"1",
+            ),
+            (sftp::OPENSSH_SFTP_EXT_COPY_DATA, "copy-data", b"1"),
+            (
+                sftp::OPENSSH_SFTP_EXT_HOME_DIRECTORY,
+                "home-directory",
+                b"1",
+            ),
+            (
+                sftp::OPENSSH_SFTP_EXT_USERS_GROUPS_BY_ID,
+                "users-groups-by-id@openssh.com",
+                b"1",
+            ),
+        ];
+
+        for (ext, name, version) in cases {
+            assert_eq!(ext.key, name, "extension name");
+            assert_eq!(ext.value, version, "extension version for {name}");
+        }
+    }
+
+    #[test]
+    fn sftp_extension_constant_builder_is_available() {
+        let ext = SFTPExtension::new("vendor@example.com", b"3");
+        assert_eq!(ext.key, "vendor@example.com");
+        assert_eq!(ext.value, b"3");
+    }
+}

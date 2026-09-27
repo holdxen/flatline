@@ -1540,3 +1540,445 @@ where
 //         Ok(Default::default())
 //     }
 // }
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn compat_options_detect_known_server_quirks() {
+        let cases = [
+            ("Sun_SSH_1.0", true, false, false, false, false),
+            ("OpenSSH_6.5", false, true, false, false, false),
+            ("OpenSSH_6.6", false, true, false, false, false),
+            ("OpenSSH_7.4", false, false, true, false, false),
+            ("3.0 SecureCRT 8.5", false, false, false, true, false),
+            ("1.7 SecureFX 3.7", false, false, false, true, false),
+            ("Cisco-1.25", false, false, false, false, true),
+        ];
+
+        for (
+            suffix,
+            unsupported_rekey,
+            curve25519_pad,
+            specify_server_sign_algorithm,
+            old_session_id,
+            limited_dh_ex,
+        ) in cases
+        {
+            let opts = CompatOptions::parse(suffix);
+            assert_eq!(opts.unsupported_rekey, unsupported_rekey, "{suffix}");
+            assert_eq!(opts.curve25519_pad, curve25519_pad, "{suffix}");
+            assert_eq!(
+                opts.specify_server_sign_algorithm, specify_server_sign_algorithm,
+                "{suffix}"
+            );
+            assert_eq!(opts.old_session_id, old_session_id, "{suffix}");
+            assert_eq!(opts.limited_dh_ex, limited_dh_ex, "{suffix}");
+        }
+    }
+
+    /// CompatOptions does not derive `PartialEq`, so compare field-wise.
+    fn assert_compat_is_default(opts: CompatOptions, label: &str) {
+        assert!(!opts.unsupported_rekey, "{label}: unsupported_rekey");
+        assert!(!opts.curve25519_pad, "{label}: curve25519_pad");
+        assert!(
+            !opts.specify_server_sign_algorithm,
+            "{label}: specify_server_sign_algorithm"
+        );
+        assert!(!opts.old_session_id, "{label}: old_session_id");
+        assert!(!opts.limited_dh_ex, "{label}: limited_dh_ex");
+    }
+
+    #[test]
+    fn compat_options_are_off_for_a_modern_server() {
+        assert_compat_is_default(CompatOptions::parse("OpenSSH_9.6"), "OpenSSH_9.6");
+    }
+
+    #[test]
+    fn compat_options_are_off_without_a_version_suffix() {
+        assert_compat_is_default(CompatOptions::parse(""), "empty suffix");
+        assert_compat_is_default(CompatOptions::parse("SomeUnknownSSH"), "unknown");
+    }
+
+    #[test]
+    fn client_methods_are_built_from_the_config() {
+        let config = Config::default();
+        let methods = Methods::from_config(&config);
+
+        // Every advertised list must come from the config's maps, in order.
+        assert_eq!(methods.kex, config.kex.keys().cloned().collect::<Vec<_>>());
+        assert_eq!(
+            methods.host_key,
+            config.host_key.keys().cloned().collect::<Vec<_>>()
+        );
+        assert_eq!(
+            methods.crypt_client_to_server,
+            config
+                .crypt_client_to_server
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            methods.crypt_server_to_client,
+            config
+                .crypt_server_to_client
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            methods.mac_client_to_server,
+            config
+                .mac_client_to_server
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            methods.compress_client_to_server,
+            config
+                .compress_client_to_server
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>()
+        );
+
+        // The negotiated switches mirror the config flags.
+        assert_eq!(methods.kex_strict, config.key_strict);
+        assert_eq!(methods.ext, config.ext);
+
+        // Language lists are always empty: SSH-2 has no defined languages.
+        assert!(methods.lang_client_to_server.is_empty());
+        assert!(methods.lang_server_to_client.is_empty());
+    }
+
+    #[test]
+    fn methods_serialize_then_parse_back_identically() {
+        let config = Config::default();
+        let methods = Methods::from_config(&config);
+        let wire = methods.build();
+
+        // First byte is SSH_MSG_KEXINIT, followed by 16 bytes of cookie.
+        assert_eq!(wire[0], crate::ssh::protocol::SSH_MSG_KEXINIT);
+        assert!(wire.len() > 17);
+
+        let parsed = Methods::parse(&wire).expect("re-parse failed");
+
+        // `build` appends this side's pseudo-algorithms (kex-strict-c /
+        // ext-info-c) to the kex list; `parse` only recognises the peer's
+        // markers (kex-strict-s / ext-info-s), so they come back verbatim
+        // and the flags stay clear when parsing our own message.
+        let mut expected_kex = methods.kex.clone();
+        if methods.kex_strict {
+            expected_kex.push(crate::ssh::protocol::KEX_STRICT_CLIENT.to_string());
+        }
+        if methods.ext {
+            expected_kex.push(crate::ssh::protocol::EXT_INFO_CLIENT.to_string());
+        }
+        assert_eq!(parsed.kex, expected_kex);
+
+        assert_eq!(parsed.host_key, methods.host_key);
+        assert_eq!(
+            parsed.crypt_client_to_server,
+            methods.crypt_client_to_server
+        );
+        assert_eq!(
+            parsed.crypt_server_to_client,
+            methods.crypt_server_to_client
+        );
+        assert_eq!(parsed.mac_client_to_server, methods.mac_client_to_server);
+        assert_eq!(parsed.mac_server_to_client, methods.mac_server_to_client);
+        assert_eq!(
+            parsed.compress_client_to_server,
+            methods.compress_client_to_server
+        );
+        assert_eq!(
+            parsed.compress_server_to_client,
+            methods.compress_server_to_client
+        );
+        assert!(!parsed.kex_strict, "client markers must not set the flag");
+        assert!(!parsed.ext, "client markers must not set the flag");
+    }
+
+    /// Rewrites our own built KEXINIT into the shape a server would send,
+    /// by swapping the client pseudo-algorithms for the server ones.
+    fn server_view_of(mut wire: Vec<u8>) -> Vec<u8> {
+        let swap = |bytes: &mut Vec<u8>, from: &str, to: &str| {
+            if let Some(pos) = find(bytes, from.as_bytes()) {
+                bytes[pos..pos + from.len()].copy_from_slice(to.as_bytes());
+            }
+        };
+        swap(
+            &mut wire,
+            crate::ssh::protocol::KEX_STRICT_CLIENT,
+            crate::ssh::protocol::KEX_STRICT_SERVER,
+        );
+        swap(
+            &mut wire,
+            crate::ssh::protocol::EXT_INFO_CLIENT,
+            crate::ssh::protocol::EXT_INFO_SERVER,
+        );
+        wire
+    }
+
+    /// Finds `needle` in `haystack`.
+    fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+        haystack
+            .windows(needle.len())
+            .position(|window| window == needle)
+    }
+
+    #[test]
+    fn parsing_a_server_kexinit_sets_and_strips_the_flags() {
+        let config = Config::default();
+        let methods = Methods::from_config(&config);
+        let wire = server_view_of(methods.build());
+
+        let parsed = Methods::parse(&wire).expect("parse failed");
+        assert!(parsed.kex_strict, "server strict marker must be detected");
+        assert!(parsed.ext, "server ext-info marker must be detected");
+
+        // ...and both must be stripped out of the algorithm list.
+        assert!(
+            !parsed
+                .kex
+                .iter()
+                .any(|k| k.starts_with("kex-strict-") || k.starts_with("ext-info-")),
+            "markers must be removed from the parsed list: {:?}",
+            parsed.kex
+        );
+        // Everything else still round-trips.
+        assert_eq!(parsed.host_key, methods.host_key);
+        assert_eq!(
+            parsed.crypt_client_to_server,
+            methods.crypt_client_to_server
+        );
+    }
+
+    #[test]
+    fn methods_parse_rejects_a_non_kexinit_message() {
+        assert!(Methods::parse(&[crate::ssh::protocol::SSH_MSG_DISCONNECT]).is_err());
+    }
+
+    #[test]
+    fn strict_kex_and_ext_info_are_advertised_on_the_wire() {
+        let mut config = Config::default();
+        config.key_strict = true;
+        config.ext = true;
+
+        let methods = Methods::from_config(&config);
+        assert!(methods.kex_strict);
+        assert!(methods.ext);
+
+        let wire = methods.build();
+        let text = String::from_utf8_lossy(&wire);
+        assert!(
+            text.contains(crate::ssh::protocol::KEX_STRICT_CLIENT),
+            "strict kex marker missing from the wire"
+        );
+        assert!(
+            text.contains(crate::ssh::protocol::EXT_INFO_CLIENT),
+            "ext-info marker missing"
+        );
+    }
+
+    #[test]
+    fn strict_kex_is_omitted_when_disabled() {
+        let mut config = Config::default();
+        config.key_strict = false;
+        config.ext = false;
+
+        let methods = Methods::from_config(&config);
+        let wire = methods.build();
+        let text = String::from_utf8_lossy(&wire);
+
+        assert!(!text.contains("kex-strict-c-v00@openssh.com"));
+        assert!(!text.contains("ext-info-c"));
+    }
+
+    #[test]
+    fn build_makes_every_name_list_a_comma_separated_string() {
+        let methods = Methods::from_config(&Config::default());
+        let wire = methods.build();
+
+        // The server's KEXINIT must be re-parsable as a name-list, which
+        // means each list came out as `a,b,c` with no trailing comma.
+        let parsed = Methods::parse(&wire).expect("parse failed");
+        for name in &parsed.kex {
+            assert!(!name.is_empty(), "empty entry in kex name-list");
+            assert!(!name.contains(','), "comma leaked into a name: {name}");
+        }
+        for name in &parsed.host_key {
+            assert!(!name.is_empty());
+        }
+    }
+
+    #[test]
+    fn do_compat_drops_curve25519_only_when_requested() {
+        // With the quirk disabled the algorithm must survive.
+        let mut methods = Methods::from_config(&Config::default());
+        methods.do_compat(false);
+        assert!(
+            methods
+                .kex
+                .contains(&"curve25519-sha256@libssh.org".to_string()),
+            "must not be removed without the quirk"
+        );
+
+        // With it enabled the buggy OpenSSH 6.5/6.6 padding is dodged by
+        // dropping the algorithm entirely.
+        let mut methods = Methods::from_config(&Config::default());
+        methods.do_compat(true);
+        assert!(
+            !methods
+                .kex
+                .contains(&"curve25519-sha256@libssh.org".to_string()),
+            "must be removed when curve25519_pad is set"
+        );
+        // The unpadded variant stays on offer.
+        assert!(methods.kex.contains(&"curve25519-sha256".to_string()));
+    }
+
+    #[test]
+    fn default_config_offers_the_usual_algorithms() {
+        let config = Config::default();
+
+        // The maps are heterogeneous (each value is a different factory
+        // type), so check them individually.
+        assert!(!config.kex.is_empty(), "kex");
+        assert!(!config.host_key.is_empty(), "host_key");
+        assert!(!config.crypt_client_to_server.is_empty(), "crypt c2s");
+        assert!(!config.crypt_server_to_client.is_empty(), "crypt s2c");
+        assert!(!config.mac_client_to_server.is_empty(), "mac c2s");
+        assert!(!config.mac_server_to_client.is_empty(), "mac s2c");
+        assert!(!config.compress_client_to_server.is_empty(), "compress c2s");
+        assert!(!config.compress_server_to_client.is_empty(), "compress s2c");
+        assert!(!config.signer.is_empty(), "signer");
+
+        // IndexMap keys are unique by construction; assert the maps really
+        // are index maps so preference order is preserved.
+        assert_eq!(
+            config.kex.keys().next().map(|k| k.as_str()),
+            crate::cipher::kex::all().first().copied(),
+            "first kex preference must be the top of the registry"
+        );
+
+        // Flags default to the hardened/modern choices.
+        assert!(config.key_strict);
+        assert!(config.ext);
+        assert!(!config.disable_compat);
+    }
+
+    #[test]
+    fn negotiation_picks_the_first_client_preference_the_server_offers() {
+        let config = Config::default();
+        let mut server = Methods::from_config(&config);
+
+        // Server offers only its last choice; the client must take it
+        // because it is the only common option.
+        let only = server
+            .kex
+            .last()
+            .cloned()
+            .expect("kex list must not be empty");
+        server.kex = vec![only.clone()];
+
+        let matched = config.negotiate(&server).expect("should negotiate");
+        assert_eq!(matched.kex.name(), only);
+    }
+
+    #[test]
+    fn negotiation_fails_when_no_algorithm_is_common() {
+        let config = Config::default();
+        let mut server = Methods::from_config(&config);
+        server.kex = vec!["no-such-kex-algorithm".to_string()];
+
+        let err = config.negotiate(&server).expect_err("must not negotiate");
+        assert!(err.to_string().contains("Negotiation failed"), "got: {err}");
+    }
+
+    #[test]
+    fn negotiation_fails_without_a_common_host_key() {
+        let config = Config::default();
+        let mut server = Methods::from_config(&config);
+        server.host_key = vec!["ssh-rsa-cert-v01@openssh.com".to_string()];
+
+        assert!(config.negotiate(&server).is_err());
+    }
+
+    #[test]
+    fn negotiation_succeeds_for_a_full_default_intersection() {
+        let config = Config::default();
+        let server = Methods::from_config(&config);
+
+        let matched = config.negotiate(&server).expect("full overlap");
+        // The negotiated instances must be named after registered algorithms.
+        assert!(!matched.kex.name().is_empty());
+        assert!(!matched.host_key.name().is_empty());
+        assert!(!matched.crypt_client_to_server.name().is_empty());
+        assert!(!matched.crypt_server_to_client.name().is_empty());
+        assert!(!matched.mac_client_to_server.name().is_empty());
+        assert!(!matched.mac_server_to_client.name().is_empty());
+        assert!(!matched.compress_client_to_server.name().is_empty());
+        assert!(!matched.compress_server_to_client.name().is_empty());
+    }
+
+    #[test]
+    fn handshake_errors_display_distinctly() {
+        let cases = [
+            (Error::BannerTooLong, "Banner too long"),
+            (Error::NegotiationFailed, "Negotiation failed"),
+            (
+                Error::SignatureVerificationFailed,
+                "Signature verification failed",
+            ),
+            (
+                Error::ServerHostKeyRejectedByUser,
+                "Server host key rejected by user",
+            ),
+        ];
+        for (err, expected) in cases {
+            assert_eq!(err.to_string(), expected);
+        }
+
+        let err = Error::UnsupportedVersion {
+            version: "SSH-1.5-old".into(),
+        };
+        assert_eq!(err.to_string(), "Unsupported SSH version: SSH-1.5-old");
+
+        let err = Error::UnexpectedServerBanner {
+            banner: "garbage".into(),
+        };
+        assert_eq!(err.to_string(), "Unexpected server banner: garbage");
+
+        let err = Error::UnexpectedMessageInStrictMode { code: 5 };
+        assert_eq!(err.to_string(), "Unexpected message in strict mode: code 5");
+    }
+
+    #[test]
+    fn config_debug_output_shows_names_not_factories() {
+        // Config's manual Debug prints only the algorithm names, which is
+        // what makes `tracing::info!("{:#?}")` of a config readable.
+        let config = Config::default();
+        let text = format!("{config:?}");
+
+        assert!(
+            text.starts_with("Config"),
+            "got: {}",
+            &text[..20.min(text.len())]
+        );
+        assert!(text.contains("kex"), "kex field missing");
+        assert!(
+            text.contains("curve25519-sha256"),
+            "algorithm names missing"
+        );
+        assert!(
+            !text.contains("Factory"),
+            "factories must not be printed: {text}"
+        );
+        assert!(text.contains("key_strict"), "flag missing");
+        assert!(text.contains("disable_compat"), "flag missing");
+    }
+}

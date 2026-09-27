@@ -1611,4 +1611,322 @@ mod test {
         let encoded = TtyModesParser::encode(&modes);
         println!("\nEncoded data: {:?}", encoded);
     }
+
+    // ------------------------------------------------------------------
+    // Offline tests: no server, no sockets.
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn tty_modes_encode_then_parse_round_trips() {
+        let modes = [
+            (TtyOpcode::VIntr, 3),
+            (TtyOpcode::VErase, 127),
+            (TtyOpcode::ECHO, 0),
+            (TtyOpcode::TtyOpOSpeed, 9600),
+            (TtyOpcode::CS8, 1),
+        ];
+
+        let wire = TtyModesParser::encode(&modes);
+        // Terminator present, and 5 entries of 5 bytes each plus one byte.
+        assert_eq!(wire.len(), modes.len() * 5 + 1);
+        assert_eq!(*wire.last().unwrap(), 0, "must end with TTY_OP_END");
+
+        let parsed = TtyModesParser::parse(&wire);
+        assert_eq!(parsed.len(), modes.len());
+        for (expected, actual) in modes.iter().zip(parsed.iter()) {
+            assert_eq!(expected, actual);
+        }
+    }
+
+    #[test]
+    fn tty_modes_encode_writes_big_endian_values() {
+        let wire = TtyModesParser::encode(&[(TtyOpcode::VIntr, 0x01020304)]);
+        assert_eq!(wire[0], TtyOpcode::VIntr as u8);
+        assert_eq!(&wire[1..5], &[1, 2, 3, 4], "value must be big-endian");
+        assert_eq!(wire[5], 0, "terminator");
+    }
+
+    #[test]
+    fn tty_modes_parse_stops_at_the_terminator() {
+        // Entries after TTY_OP_END must be ignored.
+        let mut wire = TtyModesParser::encode(&[(TtyOpcode::ECHO, 1)]);
+        wire.extend_from_slice(&[TtyOpcode::VIntr as u8, 0, 0, 0, 9]);
+
+        let parsed = TtyModesParser::parse(&wire);
+        assert_eq!(parsed, vec![(TtyOpcode::ECHO, 1)]);
+    }
+
+    #[test]
+    fn tty_modes_parse_skips_unknown_opcodes() {
+        // Opcode 200 is not a defined terminal mode.
+        let wire = [
+            200u8,
+            0,
+            0,
+            0,
+            5, // unknown, dropped
+            TtyOpcode::ECHO as u8,
+            0,
+            0,
+            0,
+            1, // known, kept
+            0,
+        ];
+
+        let parsed = TtyModesParser::parse(&wire);
+        assert_eq!(parsed, vec![(TtyOpcode::ECHO, 1)]);
+    }
+
+    #[test]
+    fn tty_modes_parse_tolerates_a_truncated_value() {
+        // Opcode followed by fewer than 4 value bytes: stop rather than read
+        // out of bounds.
+        let wire = [TtyOpcode::ECHO as u8, 0, 1];
+        assert!(TtyModesParser::parse(&wire).is_empty());
+    }
+
+    #[test]
+    fn tty_modes_parse_of_empty_input_is_empty() {
+        assert!(TtyModesParser::parse(&[]).is_empty());
+        // A bare terminator parses to nothing.
+        assert!(TtyModesParser::parse(&[0]).is_empty());
+    }
+
+    #[test]
+    fn tty_opcode_from_u8_covers_every_variant_and_rejects_junk() {
+        // Every named opcode must round-trip through its discriminant.
+        for opcode in [
+            TtyOpcode::TtyOpEnd,
+            TtyOpcode::VIntr,
+            TtyOpcode::VEOF,
+            TtyOpcode::ECHO,
+            TtyOpcode::ICANON,
+            TtyOpcode::ISIG,
+            TtyOpcode::IXON,
+            TtyOpcode::CS8,
+            TtyOpcode::TtyOpOSpeed,
+            TtyOpcode::IGNPAR,
+        ] {
+            let raw = opcode as u8;
+            let back = TtyOpcode::from_u8(raw).expect("known opcode must map back");
+            assert_eq!(back, opcode);
+        }
+
+        // Gaps in the numbering have no opcode.
+        assert_eq!(TtyOpcode::from_u8(255), None);
+    }
+
+    #[test]
+    fn tty_opcode_categories_are_mutually_exclusive() {
+        let special = TtyOpcode::VErase;
+        let input = TtyOpcode::IXON;
+        let local = TtyOpcode::ICANON;
+        let output = TtyOpcode::OPOST;
+        let control = TtyOpcode::CS8;
+        let speed = TtyOpcode::TtyOpOSpeed;
+
+        assert!(special.is_special_char());
+        assert!(input.is_input_flag());
+        assert!(local.is_local_flag());
+        assert!(output.is_output_flag());
+        assert!(control.is_control_flag());
+        assert!(speed.is_speed());
+
+        // Each opcode belongs to exactly one category.
+        assert!(!special.is_input_flag() || !special.is_speed());
+        assert!(!input.is_special_char());
+        assert!(!speed.is_control_flag());
+        assert!(!control.is_speed());
+        assert!(!local.is_output_flag());
+    }
+
+    #[test]
+    fn tty_opcode_names_are_unique() {
+        // Names appear in `request_pty` debug output, so they must not
+        // collide.
+        let mut seen = std::collections::HashSet::new();
+        for raw in 0..=255u8 {
+            let Some(opcode) = TtyOpcode::from_u8(raw) else {
+                continue;
+            };
+            assert!(
+                seen.insert(opcode.name().to_string()),
+                "duplicate name: {}",
+                opcode.name()
+            );
+        }
+    }
+
+    #[test]
+    fn tty_opcode_value_types_follow_the_category() {
+        // `value_type` returns a human-readable range description; the
+        // strings themselves are runtime literals (not translated here).
+        let control_char = TtyOpcode::VErase.value_type();
+        let boolean = TtyOpcode::IXON.value_type();
+        let speed = TtyOpcode::TtyOpOSpeed.value_type();
+
+        // Booleans share one description across the four flag categories.
+        assert_eq!(TtyOpcode::ICANON.value_type(), boolean);
+        assert_eq!(TtyOpcode::OPOST.value_type(), boolean);
+        assert_eq!(TtyOpcode::CS8.value_type(), boolean);
+        assert_eq!(TtyOpcode::IXON.value_type(), boolean);
+
+        // The categories that differ must not share the boolean string.
+        assert_ne!(control_char, boolean);
+        assert_ne!(speed, boolean);
+        assert_ne!(speed, control_char);
+
+        // TtyOpEnd is the terminator and has its own marker.
+        assert_ne!(TtyOpcode::TtyOpEnd.value_type(), boolean);
+    }
+
+    #[test]
+    fn exit_status_success_only_for_zero_exit_code() {
+        assert!(ExitStatus::Normal(0).success());
+        assert!(!ExitStatus::Normal(1).success());
+        assert!(!ExitStatus::Normal(255).success());
+
+        let interrupted = ExitStatus::Interrupt {
+            signal: crate::ssh::msg::Signal("TERM".into()),
+            core_dumped: false,
+            error_message: "terminated".into(),
+        };
+        assert!(!interrupted.success(), "killed-by-signal is never success");
+    }
+
+    #[test]
+    fn exit_status_interrupt_keeps_its_fields() {
+        let status = ExitStatus::Interrupt {
+            signal: crate::ssh::msg::Signal("SEGV".into()),
+            core_dumped: true,
+            error_message: "segmentation fault".into(),
+        };
+
+        let ExitStatus::Interrupt {
+            signal,
+            core_dumped,
+            error_message,
+        } = &status
+        else {
+            panic!("expected Interrupt, got {status:?}");
+        };
+
+        assert_eq!(signal, &"SEGV");
+        assert!(*core_dumped);
+        assert_eq!(error_message, "segmentation fault");
+    }
+
+    #[test]
+    fn special_chars_constants_have_the_usual_values() {
+        use special_chars::*;
+        assert_eq!(CTRL_C, 3);
+        assert_eq!(CTRL_D, 4);
+        assert_eq!(CTRL_U, 21);
+        assert_eq!(CTRL_Z, 26);
+        assert_eq!(CTRL_Q, 17);
+        assert_eq!(CTRL_S, 19);
+        assert_eq!(BACKSPACE, 127);
+        assert_eq!(DISABLED, 255);
+    }
+
+    #[test]
+    fn baud_rates_match_the_posix_values() {
+        use baud_rates::*;
+        assert_eq!(B0, 0);
+        assert_eq!(B50, 50);
+        assert_eq!(B9600, 9600);
+        assert_eq!(B19200, 19200);
+        assert_eq!(B38400, 38400);
+        assert_eq!(B115200, 115200);
+    }
+
+    #[test]
+    fn presets_encode_to_well_formed_wires() {
+        for (name, preset) in [
+            ("interactive_terminal", presets::interactive_terminal()),
+            ("password_input", presets::password_input()),
+            ("raw_mode", presets::raw_mode()),
+            ("serial_communication", presets::serial_communication()),
+        ] {
+            let wire = TtyModesParser::encode(&preset);
+            assert_eq!(wire.len(), preset.len() * 5 + 1, "{name} length");
+            assert_eq!(*wire.last().unwrap(), 0, "{name} terminator");
+
+            // Every preset must survive an encode/parse round trip.
+            let parsed = TtyModesParser::parse(&wire);
+            assert_eq!(parsed, preset, "{name} round trip");
+        }
+    }
+
+    #[test]
+    fn preset_password_input_disables_echo_and_keeps_canonical_mode() {
+        let preset = presets::password_input();
+
+        let echo = preset
+            .iter()
+            .find(|(op, _)| *op == TtyOpcode::ECHO)
+            .expect("ECHO must be set explicitly");
+        assert_eq!(echo.1, 0, "echo off for password entry");
+
+        let icanon = preset
+            .iter()
+            .find(|(op, _)| *op == TtyOpcode::ICANON)
+            .expect("ICANON must be set explicitly");
+        assert_eq!(icanon.1, 1, "canonical mode stays on so line editing works");
+    }
+
+    #[test]
+    fn preset_raw_mode_disables_canonical_processing_and_echo() {
+        let preset = presets::raw_mode();
+
+        let get = |op: TtyOpcode| {
+            preset
+                .iter()
+                .find(|(o, _)| *o == op)
+                .map(|(_, v)| *v)
+                .unwrap_or_else(|| panic!("{op:?} missing from raw_mode"))
+        };
+
+        assert_eq!(get(TtyOpcode::ICANON), 0, "no canonical processing");
+        assert_eq!(get(TtyOpcode::ECHO), 0, "no echo");
+        assert_eq!(get(TtyOpcode::ISIG), 0, "no signal generation");
+        assert_eq!(get(TtyOpcode::IXON), 0, "no flow control");
+        assert_eq!(get(TtyOpcode::OPOST), 0, "no output post-processing");
+    }
+
+    #[test]
+    fn preset_interactive_terminal_enables_line_editing() {
+        let preset = presets::interactive_terminal();
+
+        let get = |op: TtyOpcode| {
+            preset
+                .iter()
+                .find(|(o, _)| *o == op)
+                .map(|(_, v)| *v)
+                .unwrap_or_else(|| panic!("{op:?} missing"))
+        };
+
+        assert_eq!(get(TtyOpcode::ICANON), 1);
+        assert_eq!(get(TtyOpcode::ECHO), 1);
+        assert_eq!(get(TtyOpcode::ISIG), 1);
+        assert_eq!(get(TtyOpcode::VEOF), special_chars::CTRL_D);
+        assert_eq!(get(TtyOpcode::VIntr), special_chars::CTRL_C);
+    }
+
+    #[test]
+    fn preset_serial_communication_sets_speed_and_frame_format() {
+        let preset = presets::serial_communication();
+
+        let get = |op: TtyOpcode| {
+            preset
+                .iter()
+                .find(|(o, _)| *o == op)
+                .map(|(_, v)| *v)
+                .unwrap_or_else(|| panic!("{op:?} missing"))
+        };
+
+        assert_eq!(get(TtyOpcode::TtyOpOSpeed), 9600);
+        assert_eq!(get(TtyOpcode::TtyOpISpeed), 9600);
+        assert_eq!(get(TtyOpcode::CS8), 1, "8 data bits");
+    }
 }

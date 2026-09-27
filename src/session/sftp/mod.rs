@@ -1389,7 +1389,7 @@ mod test {
     use crate::{session::sftp::OpenFlags, test::*};
 
     async fn open_sftp() -> anyhow::Result<super::Handle> {
-        tracing_subscriber::fmt::init();
+        let _ = tracing_subscriber::fmt::try_init();
         let config = Config::load().await?;
 
         let session = config.open_session().await?;
@@ -1402,6 +1402,7 @@ mod test {
     }
 
     #[tokio::test]
+    #[ignore = "requires a live SSH server configured in Test.toml"]
     async fn test_handshake() -> anyhow::Result<()> {
         let handle = open_sftp().await?;
 
@@ -1411,6 +1412,7 @@ mod test {
     }
 
     #[tokio::test]
+    #[ignore = "requires a live SSH server configured in Test.toml"]
     async fn test_open_file() -> anyhow::Result<()> {
         let mut handle = open_sftp().await?;
 
@@ -1428,6 +1430,7 @@ mod test {
     }
 
     #[tokio::test]
+    #[ignore = "requires a live SSH server configured in Test.toml"]
     async fn test_read_file() -> anyhow::Result<()> {
         let mut handle = open_sftp().await?;
 

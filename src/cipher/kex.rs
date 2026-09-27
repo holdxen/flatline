@@ -1359,3 +1359,247 @@ mod value {
 
     pub const G_VALUE: u32 = 2;
 }
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    fn kex(name: &str) -> Box<dyn KeyExchange + Send> {
+        new_kex_by_name(name).expect("unknown kex")()
+    }
+
+    /// Runs a full curve25519 exchange between a client and a server and
+    /// returns `(client_secret, server_secret)`.
+    fn curve25519_exchange(name: &str) -> (Vec<u8>, Vec<u8>) {
+        let mut client = kex(name);
+        let mut server = kex(name);
+
+        let client_public = client.generate_key().expect("client keygen");
+        let server_public = server.generate_key().expect("server keygen");
+
+        assert_eq!(client_public.len(), 32, "X25519 public keys are 32 bytes");
+        assert_eq!(server_public.len(), 32);
+
+        let client_secret = client
+            .compute_secret_key(&server_public)
+            .expect("client derive");
+        let server_secret = server
+            .compute_secret_key(&client_public)
+            .expect("server derive");
+
+        (client_secret, server_secret)
+    }
+
+    #[test]
+    fn curve25519_peers_agree_on_the_shared_secret() {
+        for name in ["curve25519-sha256", "curve25519-sha256@libssh.org"] {
+            let (a, b) = curve25519_exchange(name);
+            assert!(!a.is_empty(), "{name}: empty shared secret");
+            assert_eq!(a, b, "{name}: peers disagree on the shared secret");
+        }
+    }
+
+    #[test]
+    fn curve25519_generates_fresh_keys_each_time() {
+        let mut k = kex("curve25519-sha256");
+        let first = k.generate_key().unwrap();
+        let second = k.generate_key().unwrap();
+        assert_ne!(first, second, "reusing an ephemeral key would be a defect");
+    }
+
+    #[test]
+    fn curve25519_secret_differs_per_session() {
+        let (a, _) = curve25519_exchange("curve25519-sha256");
+        let (b, _) = curve25519_exchange("curve25519-sha256");
+        assert_ne!(a, b, "two sessions must not share a shared secret");
+    }
+
+    #[test]
+    fn deriving_without_generating_first_fails() {
+        let mut k = kex("curve25519-sha256");
+        assert!(k.compute_secret_key(&[0u8; 32]).is_err());
+    }
+
+    #[test]
+    fn deriving_from_a_malformed_peer_key_fails() {
+        let mut k = kex("curve25519-sha256");
+        k.generate_key().unwrap();
+        assert!(k.compute_secret_key(&[0u8; 5]).is_err());
+    }
+
+    /// Builds an `Information` with controllable shared-secret bytes.
+    fn info_with_secret(secret: &[u8]) -> Information<'_> {
+        Information {
+            client_version: "SSH-2.0-flatline_0.1.2",
+            server_version: "SSH-2.0 OpenSSH_9.0",
+            client_kex_init: &[1u8, 2, 3],
+            server_kex_init: &[4u8, 5, 6],
+            server_host_key: &[7u8, 8],
+            client_public_key: &[9u8; 32],
+            server_public_key: &[10u8; 32],
+            secret_key: secret,
+        }
+    }
+
+    #[test]
+    fn exchange_hash_is_deterministic_and_input_sensitive() {
+        // The same inputs must always produce the same exchange hash: the
+        // first one doubles as the session ID.
+        let mut a = kex("curve25519-sha256");
+        let first = a
+            .compute_hash(info_with_secret(&[11u8; 32]))
+            .expect("hash failed");
+        let second = a
+            .compute_hash(info_with_secret(&[11u8; 32]))
+            .expect("hash failed");
+        assert_eq!(first, second);
+        assert_eq!(first.len(), 32, "SHA-256 output");
+
+        // Flipping the shared secret must change the hash.
+        let mut b = kex("curve25519-sha256");
+        let other = b
+            .compute_hash(info_with_secret(&[12u8; 32]))
+            .expect("hash failed");
+        assert_ne!(first, other);
+    }
+
+    #[test]
+    fn exchange_hash_swaps_when_the_versions_swap() {
+        // The exchange hash covers the ordered pair (client, server), so
+        // swapping the identification strings must change it.
+        fn versions<'a>(client: &'a str, server: &'a str) -> Information<'a> {
+            Information {
+                client_version: client,
+                server_version: server,
+                client_kex_init: &[1],
+                server_kex_init: &[2],
+                server_host_key: &[3],
+                client_public_key: &[4; 32],
+                server_public_key: &[5; 32],
+                secret_key: &[6; 32],
+            }
+        }
+
+        let mut k = kex("curve25519-sha256");
+        let forward = k
+            .compute_hash(versions("SSH-2.0-client", "SSH-2.0-server"))
+            .unwrap();
+        let mut k2 = kex("curve25519-sha256");
+        let reversed = k2
+            .compute_hash(versions("SSH-2.0-server", "SSH-2.0-client"))
+            .unwrap();
+
+        assert_ne!(forward, reversed);
+    }
+
+    #[test]
+    fn derived_keys_depend_on_the_derivation_label() {
+        let k = kex("curve25519-sha256");
+        let secret = [7u8; 32];
+        let session = [1u8; 32];
+        let hash = [2u8; 32];
+
+        let mut seen = Vec::new();
+        for label in [b'A', b'B', b'C', b'D', b'E', b'F'] {
+            let key = k
+                .compute_communicate_key(&secret, &session, &hash, label, 32)
+                .expect("derivation failed");
+            assert_eq!(key.len(), 32, "label {}", label as char);
+            assert!(
+                !seen.contains(&key),
+                "label {} produced a repeated key",
+                label as char
+            );
+            seen.push(key);
+        }
+    }
+
+    #[test]
+    fn derived_keys_honor_the_requested_length() {
+        let k = kex("curve25519-sha256");
+        for len in [1usize, 16, 32, 64, 256] {
+            let key = k
+                .compute_communicate_key(&[7u8; 32], &[1u8; 32], &[2u8; 32], b'A', len)
+                .expect("derivation failed");
+            assert_eq!(key.len(), len);
+        }
+    }
+
+    #[test]
+    fn derived_keys_depend_on_the_session_id() {
+        let k = kex("curve25519-sha256");
+        let a = k
+            .compute_communicate_key(&[7u8; 32], &[1u8; 32], &[2u8; 32], b'C', 32)
+            .unwrap();
+        let b = k
+            .compute_communicate_key(&[7u8; 32], &[9u8; 32], &[2u8; 32], b'C', 32)
+            .unwrap();
+        assert_ne!(a, b, "a new session ID must yield fresh keys");
+    }
+
+    #[test]
+    fn fixed_group_kex_has_no_group_exchange_sub_step() {
+        for name in ["curve25519-sha256", "ecdh-sha2-nistp256"] {
+            let mut k = kex(name);
+            assert!(k.exchange().is_none(), "{name} uses a fixed group");
+        }
+    }
+
+    #[test]
+    fn group_exchange_kex_exposes_the_sub_negotiation() {
+        for name in ["diffie-hellman-group-exchange-sha256"] {
+            let mut k = kex(name);
+            let exchange = k.exchange().unwrap_or_else(|| panic!("{name} needs GEX"));
+
+            assert!(exchange.min() > 0, "min group size");
+            assert!(exchange.max() >= exchange.min(), "max >= min");
+            assert!(
+                exchange.number_of_bits() <= exchange.max()
+                    && exchange.number_of_bits() >= exchange.min(),
+                "recommended size within [min, max]"
+            );
+            assert_eq!(exchange.request_code(), SSH_MSG_KEX_DH_GEX_REQUEST);
+            assert_eq!(exchange.response_code(), SSH_MSG_KEX_DH_GEX_GROUP);
+        }
+    }
+
+    #[test]
+    fn recommended_group_size_is_clamped_to_the_offered_range() {
+        let mut k = kex("diffie-hellman-group-exchange-sha256");
+        let exchange = k.exchange().unwrap();
+        let (min, max) = (exchange.min(), exchange.max());
+
+        exchange.set_recommended_number_of_bits(1);
+        assert!(exchange.number_of_bits() >= min, "clamped up to min");
+
+        exchange.set_recommended_number_of_bits(u32::MAX);
+        assert!(exchange.number_of_bits() <= max, "clamped down to max");
+    }
+
+    #[test]
+    fn a_group_too_small_for_the_negotiated_range_is_rejected() {
+        let mut k = kex("diffie-hellman-group-exchange-sha256");
+        let exchange = k.exchange().unwrap();
+
+        // A 64-bit prime is far below the 1024-bit floor OpenSSH accepts.
+        let small_prime = {
+            let mut p = vec![0u8; 8];
+            p[0] = 0xff;
+            p
+        };
+        let result = exchange.initialize(&small_prime, &[2]);
+        assert!(result.is_err(), "a tiny prime must be rejected");
+    }
+
+    #[test]
+    fn kex_request_and_response_codes_are_distinct() {
+        for name in new_all().keys() {
+            let k = kex(name);
+            assert_ne!(
+                k.request_code(),
+                k.response_code(),
+                "{name}: request and response must differ"
+            );
+        }
+    }
+}

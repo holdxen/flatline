@@ -390,3 +390,181 @@ impl Mac for HMac {
         &self.name
     }
 }
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    /// A key sized for the HMAC algorithms under test (32 bytes).
+    const KEY: [u8; 32] = [0x42; 32];
+
+    fn mac(name: &str) -> Box<dyn Mac + Send> {
+        new_mac_by_name(name).expect("unknown mac")()
+    }
+
+    /// Computes a tag over (sequence number, packet) as the packet layer does.
+    fn tag_over(m: &mut Box<dyn Mac + Send>, seq: u32, packet: &[u8]) -> Vec<u8> {
+        m.update(&seq.to_be_bytes()).unwrap();
+        m.update(packet).unwrap();
+        m.finalize().unwrap()
+    }
+
+    #[test]
+    fn hmac_is_deterministic_for_the_same_input() {
+        let mut a = mac("hmac-sha2-256");
+        let mut b = mac("hmac-sha2-256");
+        a.initialize(&KEY).unwrap();
+        b.initialize(&KEY).unwrap();
+
+        assert_eq!(
+            tag_over(&mut a, 0, b"payload"),
+            tag_over(&mut b, 0, b"payload")
+        );
+    }
+
+    #[test]
+    fn hmac_changes_with_key_sequence_and_packet() {
+        let base = {
+            let mut m = mac("hmac-sha2-256");
+            m.initialize(&KEY).unwrap();
+            tag_over(&mut m, 0, b"payload")
+        };
+
+        let mut other_key = mac("hmac-sha2-256");
+        other_key.initialize(&[0x43; 32]).unwrap();
+        assert_ne!(tag_over(&mut other_key, 0, b"payload"), base);
+
+        let mut other_seq = mac("hmac-sha2-256");
+        other_seq.initialize(&KEY).unwrap();
+        assert_ne!(tag_over(&mut other_seq, 1, b"payload"), base);
+
+        let mut other_packet = mac("hmac-sha2-256");
+        other_packet.initialize(&KEY).unwrap();
+        assert_ne!(tag_over(&mut other_packet, 0, b"payloae"), base);
+    }
+
+    #[test]
+    fn hmac_state_resets_between_packets() {
+        let mut m = mac("hmac-sha2-256");
+        m.initialize(&KEY).unwrap();
+
+        let first = tag_over(&mut m, 5, b"packet");
+        let second = tag_over(&mut m, 5, b"packet");
+
+        // finalize() must reset the context, so repeating the same packet
+        // yields the same tag rather than extending the first one.
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn mac_tag_lengths_match_protocol_expectations() {
+        let cases = [
+            ("hmac-sha2-256", 32, 32),
+            ("hmac-sha2-512", 64, 64),
+            ("hmac-sha1", 20, 20),
+            ("hmac-sha1-96", 12, 20), // truncated tag, full key
+        ];
+        for (name, mac_len, key_len) in cases {
+            let m = mac(name);
+            assert_eq!(m.mac_len(), mac_len, "mac_len of {name}");
+            assert_eq!(m.key_len(), key_len, "key_len of {name}");
+        }
+    }
+
+    #[test]
+    fn etm_variants_are_flagged_and_plain_ones_are_not() {
+        assert!(mac("hmac-sha2-256-etm@openssh.com").encrypt_then_mac());
+        assert!(mac("hmac-sha1-etm@openssh.com").encrypt_then_mac());
+        assert!(!mac("hmac-sha2-256").encrypt_then_mac());
+        assert!(!mac("hmac-sha1").encrypt_then_mac());
+    }
+
+    #[test]
+    fn truncated_tag_is_a_prefix_of_the_full_tag() {
+        // hmac-sha1-96 emits only the first 12 bytes of the SHA-1 tag.
+        let mut truncated = mac("hmac-sha1-96");
+        let mut full = mac("hmac-sha1");
+        truncated.initialize(&KEY).unwrap();
+        full.initialize(&KEY).unwrap();
+
+        assert_eq!(
+            tag_over(&mut truncated, 0, b"payload"),
+            &tag_over(&mut full, 0, b"payload")[..12]
+        );
+    }
+
+    #[test]
+    fn update_without_initialize_fails() {
+        let mut m = mac("hmac-sha2-256");
+        assert!(m.update(b"data").is_err());
+    }
+
+    #[test]
+    fn finalize_without_initialize_fails() {
+        let mut m = mac("hmac-sha2-256");
+        assert!(m.finalize().is_err());
+    }
+
+    #[test]
+    fn every_registered_mac_reports_its_registered_name() {
+        for name in all() {
+            let mut m = new_mac_by_name(name).expect("missing factory")();
+            assert_eq!(m.name(), *name);
+
+            // Each algorithm wants exactly `key_len()` bytes: HMAC accepts
+            // anything, but UMAC slices the key to a fixed size.
+            let key = vec![0x42; m.key_len()];
+            m.initialize(&key).expect("initialize failed");
+
+            // Drive it the way the packet layer does: sequence number
+            // first, then the packet bytes. UMAC needs the sequence number
+            // to build its nonce, so a bare finalize is not enough.
+            m.update(&7u32.to_be_bytes()).expect("update seq");
+            m.update(b"packet bytes").expect("update payload");
+
+            let tag = m.finalize().expect("finalize failed");
+            assert_eq!(tag.len(), m.mac_len(), "tag length of {name}");
+        }
+    }
+
+    #[test]
+    fn finalize_without_a_sequence_number_fails_for_umac() {
+        // UMAC derives its nonce from the packet sequence number, which
+        // only arrives through `update`, so finalize alone is an error
+        // (documented behaviour, not a defect).
+        #[cfg(feature = "umac")]
+        {
+            let mut m = mac("umac-128@openssh.com");
+            m.initialize(&vec![0x42; m.key_len()]).expect("init");
+            assert!(m.finalize().is_err());
+        }
+    }
+
+    #[test]
+    fn hmac_accepts_a_longer_key_than_it_declares() {
+        // HMAC keys are hashed down, so an over-long key is fine — unlike
+        // UMAC, which needs an exact match (see the panic note below).
+        let mut m = mac("hmac-sha2-256");
+        assert_eq!(m.key_len(), 32);
+        assert!(m.initialize(&[0x42; 64]).is_ok());
+    }
+
+    /// KNOWN SHARP EDGE (not yet fixed): `UMac::initialize` does
+    /// `key.try_into().unwrap()` with a fixed-size array target, so a key of
+    /// the wrong length panics (`TryFromSliceError`) instead of returning an
+    /// error — the same shape of problem as the cipher `initialize` path.
+    ///
+    /// The packet layer is safe: key lengths come from the negotiated
+    /// algorithm's `key_len()`. Only a direct caller supplying a mismatched
+    /// key can hit it.
+    ///
+    /// Only meaningful with `--features umac`.
+    #[test]
+    #[cfg(feature = "umac")]
+    #[should_panic(expected = "TryFromSliceError")]
+    fn umac_initialize_with_a_wrong_length_key_panics() {
+        let mut m = mac("umac-128@openssh.com");
+        // umac-128 wants a 16-byte key; give it 32.
+        let _ = m.initialize(&[0x42; 32]);
+    }
+}

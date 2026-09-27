@@ -755,3 +755,514 @@ impl Directory {
         &self.handle
     }
 }
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    /// Encodes an SSH `string`: 4-byte big-endian length + bytes.
+    fn ssh_string(bytes: &[u8]) -> Vec<u8> {
+        let mut out = (bytes.len() as u32).to_be_bytes().to_vec();
+        out.extend_from_slice(bytes);
+        out
+    }
+
+    /// Every bit `Permissions` defines, or-ed together.
+    fn all_permission_bits() -> Permissions {
+        Permissions::OTHER_EXEC
+            | Permissions::OTHER_WRITE
+            | Permissions::OTHER_READ
+            | Permissions::GROUP_EXEC
+            | Permissions::GROUP_WRITE
+            | Permissions::GROUP_READ
+            | Permissions::OWNER_EXEC
+            | Permissions::OWNER_WRITE
+            | Permissions::OWNER_READ
+    }
+
+    fn all_flags_attributes() -> Attributes {
+        let mut extend = HashMap::new();
+        extend.insert("vendor@openssh.com".to_string(), b"1".to_vec());
+
+        Attributes {
+            size: Some(4096),
+            user: Some(User {
+                uid: 1000,
+                gid: 1000,
+            }),
+            property: Some(PermissionsAndFileType::new(
+                all_permission_bits(),
+                FileType::Directory,
+            )),
+            time: Some(Timestamp {
+                atime: 1_700_000_000,
+                mtime: 1_700_000_123,
+            }),
+            extend: Some(extend),
+        }
+    }
+
+    #[test]
+    fn attributes_round_trip_with_all_flags() {
+        let attrs = all_flags_attributes();
+        let bytes = attrs.to_bytes();
+
+        let mut consumer = Consumer::new(&bytes);
+        let parsed = Attributes::parse(&mut consumer).unwrap();
+
+        assert_eq!(parsed, attrs);
+        assert!(consumer.is_empty());
+    }
+
+    #[test]
+    fn attributes_round_trip_with_no_flags() {
+        let attrs = Attributes {
+            size: None,
+            user: None,
+            property: None,
+            time: None,
+            extend: None,
+        };
+        let bytes = attrs.to_bytes();
+
+        // Only the flags word, all zeros.
+        assert_eq!(bytes, [0, 0, 0, 0]);
+
+        let mut consumer = Consumer::new(&bytes);
+        let parsed = Attributes::parse(&mut consumer).unwrap();
+        assert_eq!(parsed, attrs);
+    }
+
+    #[test]
+    fn attributes_flags_only_size() {
+        let attrs = Attributes {
+            size: Some(1234),
+            user: None,
+            property: None,
+            time: None,
+            extend: None,
+        };
+        let bytes = attrs.to_bytes();
+
+        // flags = SSH_FILEXFER_ATTR_SIZE = 0x00000001
+        assert_eq!(&bytes[..4], &1u32.to_be_bytes());
+        assert_eq!(&bytes[4..], &1234u64.to_be_bytes());
+        assert_eq!(bytes.len(), 12);
+    }
+
+    #[test]
+    fn attributes_partial_fields_round_trip() {
+        let attrs = Attributes {
+            size: None,
+            user: Some(User { uid: 0, gid: 0 }),
+            property: None,
+            time: Some(Timestamp { atime: 1, mtime: 2 }),
+            extend: None,
+        };
+
+        let bytes = attrs.to_bytes();
+        let mut consumer = Consumer::new(&bytes);
+        let parsed = Attributes::parse(&mut consumer).unwrap();
+
+        assert_eq!(parsed, attrs);
+        assert_eq!(parsed.user.unwrap().uid, 0);
+        assert_eq!(parsed.time.unwrap().mtime, 2);
+    }
+
+    #[test]
+    fn attributes_truncated_input_fails() {
+        // flags say SIZE is present but no size bytes follow
+        let bytes = 1u32.to_be_bytes();
+        let mut consumer = Consumer::new(&bytes);
+        assert!(Attributes::parse(&mut consumer).is_err());
+    }
+
+    #[test]
+    fn permissions_and_file_type_bits_round_trip() {
+        // Use only bits Permissions defines, so the round trip is lossless.
+        let combo = PermissionsAndFileType::new(all_permission_bits(), FileType::Directory);
+        let bits = combo.bits();
+
+        // The S_IFMT bits are present for the directory type.
+        assert_eq!(bits & 0o170000, FileType::Directory as u32);
+
+        let back = PermissionsAndFileType::try_from(bits).unwrap();
+        assert_eq!(back.file_type, FileType::Directory);
+        assert_eq!(back.permissions, all_permission_bits());
+        assert_eq!(back.bits(), bits);
+    }
+
+    #[test]
+    fn permissions_p0755_sets_the_octal_mode() {
+        // p0755 retains the raw 0o755 word, which is what goes on the wire.
+        assert_eq!(Permissions::p0755().bits(), 0o755);
+    }
+
+    #[test]
+    fn permissions_from_raw_value_drops_file_type_and_unknown_bits() {
+        // set-user-ID (0o4000) is not part of Permissions and must be dropped,
+        // as must the S_IFMT file-type bits.
+        let bits = 0o40755 | 0o4000;
+        let combo = PermissionsAndFileType::try_from(bits).unwrap();
+
+        assert_eq!(combo.permissions, Permissions::from_bits_truncate(bits));
+        assert_eq!(combo.file_type, FileType::Directory);
+        // setuid never survives the round trip
+        assert_eq!(combo.bits() & 0o4000, 0);
+    }
+
+    /// KNOWN BUG (not yet fixed): the `GROUP_*` and `OWNER_*` constants do not
+    /// match POSIX/SFTP mode bits.
+    ///
+    /// The doc comments on [`Permissions`] give the POSIX values (`0o010`,
+    /// `0o200`, ...) but the definitions shift one bit too far for group
+    /// (`1 << n << 4` = `0o020`, should be `1 << n << 3`) and two bits too
+    /// far for owner (`1 << n << 8` = `0o1000`, should be `1 << n << 6`).
+    /// As a result `PermissionsAndFileType::try_from(mode).bits()` is lossy for
+    /// any real `mode_t` — e.g. `0o755` loses `0o200` and `0o010` — and
+    /// `Permissions::OWNER_READ.bits()` is `0o2000` instead of `0o400`.
+    ///
+    /// Run with `cargo test -- --ignored permissions_group_and_owner_bits_match_posix`
+    /// to check whether it has been fixed.
+    #[test]
+    #[ignore = "known bug: Permissions GROUP_*/OWNER_* constants are shifted"]
+    fn permissions_group_and_owner_bits_match_posix() {
+        assert_eq!(Permissions::OTHER_EXEC.bits(), 0o001);
+        assert_eq!(Permissions::OTHER_WRITE.bits(), 0o002);
+        assert_eq!(Permissions::OTHER_READ.bits(), 0o004);
+        assert_eq!(Permissions::GROUP_EXEC.bits(), 0o010);
+        assert_eq!(Permissions::GROUP_WRITE.bits(), 0o020);
+        assert_eq!(Permissions::GROUP_READ.bits(), 0o040);
+        assert_eq!(Permissions::OWNER_EXEC.bits(), 0o100);
+        assert_eq!(Permissions::OWNER_WRITE.bits(), 0o200);
+        assert_eq!(Permissions::OWNER_READ.bits(), 0o400);
+
+        // A real mode_t must survive try_from/bits unharmed.
+        let combo = PermissionsAndFileType::try_from(0o40755).unwrap();
+        assert_eq!(combo.bits(), 0o40755);
+    }
+
+    #[test]
+    fn permissions_and_file_type_unknown_type_fails() {
+        // S_IFMT bits set to a value that maps to no file type
+        let err = PermissionsAndFileType::try_from(0o110000).unwrap_err();
+        assert!(
+            err.to_string().contains("file type")
+                || err.to_string().contains("Unknown")
+                || err.to_string().contains("unknown"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn file_type_predicates() {
+        assert!(FileType::Directory.is_directory());
+        assert!(!FileType::Directory.is_regular_file());
+
+        assert!(FileType::RegularFile.is_regular_file());
+        assert!(!FileType::RegularFile.is_directory());
+
+        assert!(FileType::SymbolicLink.is_symbolic_link());
+        assert!(FileType::CharacterDevice.is_character_device());
+        assert!(FileType::BlockDevice.is_block_device());
+        assert!(FileType::FIFO.is_fifo());
+        assert!(FileType::Socket.is_socket());
+
+        assert!(!FileType::RegularFile.is_symbolic_link());
+    }
+
+    #[test]
+    fn open_flags_bits() {
+        let flags = OpenFlags::READ | OpenFlags::CREAT | OpenFlags::TRUNC;
+        assert!(flags.contains(OpenFlags::READ));
+        assert!(flags.contains(OpenFlags::CREAT));
+        assert!(flags.contains(OpenFlags::TRUNC));
+        assert!(!flags.contains(OpenFlags::EXCL));
+
+        // Values come straight from the SSH_FXF_* constants.
+        assert_eq!(OpenFlags::READ.bits(), SSH_FXF_READ);
+        assert_eq!(OpenFlags::WRITE.bits(), SSH_FXF_WRITE);
+        assert_eq!(OpenFlags::APPEND.bits(), SSH_FXF_APPEND);
+        assert_eq!(OpenFlags::EXCL.bits(), SSH_FXF_EXCL);
+    }
+
+    #[test]
+    fn status_codes_match_protocol_constants() {
+        assert_eq!(Status::OK as u32, SSH_FX_OK);
+        assert_eq!(Status::Eof as u32, SSH_FX_EOF);
+        assert_eq!(Status::NoSuchFile as u32, SSH_FX_NO_SUCH_FILE);
+        assert_eq!(Status::PermissionDenied as u32, SSH_FX_PERMISSION_DENIED);
+        assert_eq!(Status::Failure as u32, SSH_FX_FAILURE);
+        assert_eq!(Status::BadMessage as u32, SSH_FX_BAD_MESSAGE);
+        assert_eq!(Status::NoConnection as u32, SSH_FX_NO_CONNECTION);
+        assert_eq!(Status::ConnectionLost as u32, SSH_FX_CONNECTION_LOST);
+        assert_eq!(Status::OpUnsupported as u32, SSH_FX_OP_UNSUPPORTED);
+    }
+
+    #[test]
+    fn status_ok_is_ok_but_others_are_errors() {
+        assert!(Status::OK.to_result("fine".into()).is_ok());
+        assert!(Status::Eof.to_result("end".into()).is_err());
+        assert!(Status::NoSuchFile.to_result("nope".into()).is_err());
+        assert!(Status::OpUnsupported.to_result("nope".into()).is_err());
+    }
+
+    #[test]
+    fn status_to_result_error_messages_carry_server_text() {
+        let err = Status::PermissionDenied
+            .to_result("denied".into())
+            .unwrap_err();
+        assert!(err.to_string().contains("denied"), "got: {err}");
+    }
+
+    /// Unwraps the two `From` layers an SFTP error passes through:
+    /// `sftp::Error` -> `session::Error` -> `error::Error`.
+    fn unwrap_sftp(err: crate::error::Error) -> crate::session::sftp::Error {
+        let crate::error::Error::SessionError { source } = err else {
+            panic!("expected SessionError, got {err:?}");
+        };
+        let crate::session::Error::SSHFileTransferProtocolError { source } = source else {
+            panic!("expected SSHFileTransferProtocolError, got {source:?}");
+        };
+        source
+    }
+
+    #[test]
+    fn status_to_error_matches_expected_variants() {
+        use crate::session::Error as SessionError;
+        use crate::session::sftp::Error as SftpError;
+
+        let err = unwrap_sftp(Status::NoSuchFile.to_error("gone".into()));
+        let SftpError::NoSuchFile { msg } = err else {
+            panic!("expected NoSuchFile, got {err:?}");
+        };
+        assert_eq!(msg, "gone");
+
+        let err = unwrap_sftp(Status::Eof.to_error("eof".into()));
+        assert!(matches!(err, SftpError::UnexpectedEof { .. }));
+
+        // Status::OK maps to UnexpectedResponse rather than being dropped.
+        let err = unwrap_sftp(Status::OK.to_error("ok".into()));
+        assert!(matches!(err, SftpError::UnexpectedResponse { .. }));
+
+        // The outermost wrapper stays intact for callers matching on it.
+        let outer = Status::Failure.to_error("nope".into());
+        assert!(matches!(
+            outer,
+            crate::error::Error::SessionError {
+                source: SessionError::SSHFileTransferProtocolError { .. }
+            }
+        ));
+    }
+
+    #[test]
+    fn file_cursor_moves_forward_and_backward() {
+        let mut file = File::new(b"h".to_vec());
+        assert_eq!(file.pos(), 0);
+
+        file.forward(100);
+        assert_eq!(file.pos(), 100);
+
+        file.forward(50);
+        assert_eq!(file.pos(), 150);
+
+        file.backward(30);
+        assert_eq!(file.pos(), 120);
+
+        file.backward(120);
+        assert_eq!(file.pos(), 0);
+    }
+
+    #[test]
+    fn parse_status_message() {
+        let mut data = vec![SSH_FXP_STATUS];
+        data.extend_from_slice(&7u32.to_be_bytes()); // id
+        data.extend_from_slice(&SSH_FX_NO_SUCH_FILE.to_be_bytes());
+        data.extend_from_slice(&ssh_string(b"no such file"));
+        data.extend_from_slice(&ssh_string(b"en"));
+
+        let message = Message::parse(&data).unwrap();
+        assert_eq!(message.id, 7);
+        let Payload::Status {
+            status,
+            error,
+            language,
+        } = message.payload
+        else {
+            panic!("expected Status, got {:?}", message.payload);
+        };
+        assert_eq!(status, Status::NoSuchFile);
+        assert_eq!(error, "no such file");
+        assert_eq!(language, "en");
+    }
+
+    #[test]
+    fn parse_status_with_unknown_code_fails() {
+        let mut data = vec![SSH_FXP_STATUS];
+        data.extend_from_slice(&1u32.to_be_bytes());
+        data.extend_from_slice(&9999u32.to_be_bytes());
+        data.extend_from_slice(&ssh_string(b"??"));
+        data.extend_from_slice(&ssh_string(b""));
+
+        assert!(Message::parse(&data).is_err());
+    }
+
+    #[test]
+    fn parse_handle_message() {
+        let mut data = vec![SSH_FXP_HANDLE];
+        data.extend_from_slice(&3u32.to_be_bytes());
+        data.extend_from_slice(&ssh_string(b"handle-1"));
+
+        let message = Message::parse(&data).unwrap();
+        assert_eq!(message.id, 3);
+        let Payload::Handle(handle) = message.payload else {
+            panic!("expected Handle, got {:?}", message.payload);
+        };
+        assert_eq!(handle, b"handle-1");
+    }
+
+    #[test]
+    fn parse_data_message() {
+        let mut data = vec![SSH_FXP_DATA];
+        data.extend_from_slice(&9u32.to_be_bytes());
+        data.extend_from_slice(&ssh_string(b"contents"));
+
+        let message = Message::parse(&data).unwrap();
+        assert_eq!(message.id, 9);
+        let Payload::Data(payload) = message.payload else {
+            panic!("expected Data, got {:?}", message.payload);
+        };
+        assert_eq!(payload, b"contents");
+    }
+
+    #[test]
+    fn parse_name_message_with_two_entries() {
+        let attrs = Attributes {
+            size: None,
+            user: None,
+            property: Some(PermissionsAndFileType::new(
+                all_permission_bits(),
+                FileType::Directory,
+            )),
+            time: None,
+            extend: None,
+        };
+
+        let mut data = vec![SSH_FXP_NAME];
+        data.extend_from_slice(&5u32.to_be_bytes()); // id
+        data.extend_from_slice(&2u32.to_be_bytes()); // count
+        for name in ["a", "b"] {
+            data.extend_from_slice(&ssh_string(name.as_bytes()));
+            data.extend_from_slice(&ssh_string(format!("drwxr-xr-x {}", name).as_bytes()));
+            data.extend_from_slice(&attrs.to_bytes());
+        }
+
+        let message = Message::parse(&data).unwrap();
+        assert_eq!(message.id, 5);
+        let Payload::Name(entries) = message.payload else {
+            panic!("expected Name, got {:?}", message.payload);
+        };
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].file_name, "a");
+        assert_eq!(entries[1].file_name, "b");
+        assert_eq!(entries[0].long_name, "drwxr-xr-x a");
+        assert_eq!(entries[0].attributes, attrs);
+        assert_eq!(entries[1].attributes, attrs);
+    }
+
+    #[test]
+    fn parse_attrs_message() {
+        let attrs = Attributes {
+            size: Some(77),
+            user: None,
+            property: None,
+            time: None,
+            extend: None,
+        };
+
+        let mut data = vec![SSH_FXP_ATTRS];
+        data.extend_from_slice(&2u32.to_be_bytes());
+        data.extend_from_slice(&attrs.to_bytes());
+
+        let message = Message::parse(&data).unwrap();
+        assert_eq!(message.id, 2);
+        let Payload::Attributes(parsed) = message.payload else {
+            panic!("expected Attributes, got {:?}", message.payload);
+        };
+        assert_eq!(parsed, attrs);
+    }
+
+    #[test]
+    fn parse_extended_reply_keeps_raw_bytes() {
+        let mut data = vec![SSH_FXP_EXTENDED_REPLY];
+        data.extend_from_slice(&4u32.to_be_bytes());
+        data.extend_from_slice(&42u64.to_be_bytes());
+
+        let message = Message::parse(&data).unwrap();
+        assert_eq!(message.id, 4);
+        let Payload::ExtendReply(raw) = message.payload else {
+            panic!("expected ExtendReply, got {:?}", message.payload);
+        };
+        assert_eq!(raw, 42u64.to_be_bytes());
+    }
+
+    #[test]
+    fn parse_unknown_message_type_fails() {
+        let mut data = vec![SSH_FXP_INIT]; // a type this parser never handles
+        data.extend_from_slice(&1u32.to_be_bytes());
+
+        assert!(Message::parse(&data).is_err());
+    }
+
+    #[test]
+    fn parse_missing_id_fails() {
+        assert!(Message::parse(&[SSH_FXP_STATUS]).is_err());
+    }
+
+    #[test]
+    fn statvfs_parses_eleven_u64_fields() {
+        let mut data = Vec::new();
+        for value in 1u64..=11 {
+            data.extend_from_slice(&value.to_be_bytes());
+        }
+
+        let stat = Statvfs::parse(&data).unwrap();
+        assert_eq!(stat.bsize, 1);
+        assert_eq!(stat.frsize, 2);
+        assert_eq!(stat.blocks, 3);
+        assert_eq!(stat.bfree, 4);
+        assert_eq!(stat.bavail, 5);
+        assert_eq!(stat.files, 6);
+        assert_eq!(stat.ffree, 7);
+        assert_eq!(stat.favail, 8);
+        assert_eq!(stat.fsid, 9);
+        assert_eq!(stat.flag, 10);
+        assert_eq!(stat.namemax, 11);
+    }
+
+    #[test]
+    fn statvfs_flag_constants() {
+        assert_eq!(Statvfs::FLAG_RDONLY, 0x1);
+        assert_eq!(Statvfs::FLAG_NOSUID, 0x2);
+    }
+
+    #[test]
+    fn limits_parses_four_u64_fields() {
+        let mut data = Vec::new();
+        for value in [1u64, 2, 3, 4] {
+            data.extend_from_slice(&value.to_be_bytes());
+        }
+
+        let limits = Limits::parse(&data).unwrap();
+        assert_eq!(limits.max_packet_len, 1);
+        assert_eq!(limits.max_read_len, 2);
+        assert_eq!(limits.max_write_len, 3);
+        assert_eq!(limits.max_open_handles, 4);
+    }
+
+    #[test]
+    fn statvfs_truncated_input_fails() {
+        let data = [0u8; 8]; // one u64, needs eleven
+        assert!(Statvfs::parse(&data).is_err());
+    }
+}

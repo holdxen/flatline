@@ -983,3 +983,302 @@ impl Encrypt for CounterModeOrCipherBlockChaining {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    /// Builds a deterministic key/IV pair of the requested lengths.
+    fn material(len: usize, seed: u8) -> Vec<u8> {
+        (0..len).map(|i| seed.wrapping_add(i as u8)).collect()
+    }
+
+    fn encryptor(name: &str) -> Box<dyn Encrypt + Send> {
+        new_encrypt_by_name(name).expect("unknown cipher")()
+    }
+
+    fn decryptor(name: &str) -> Box<dyn Decrypt + Send> {
+        new_decrypt_by_name(name).expect("unknown cipher")()
+    }
+
+    /// Encrypts one non-AEAD packet body and returns the wire bytes.
+    fn seal(name: &str, seq: u32, plain: &[u8]) -> Vec<u8> {
+        let mut enc = encryptor(name);
+        enc.initialize(&material(enc.iv_len(), 1), &material(enc.key_len(), 2))
+            .expect("init failed");
+        enc.update_sequence_number(seq).expect("seq failed");
+
+        let mut out = Vec::new();
+        enc.update(plain, &mut out).expect("update failed");
+        enc.finalize(&mut out).expect("finalize failed");
+        out
+    }
+
+    /// Decrypts bytes produced by [`seal`] with the same parameters.
+    fn open(name: &str, seq: u32, cipher: &[u8]) -> Vec<u8> {
+        let mut dec = decryptor(name);
+        dec.initialize(&material(dec.iv_len(), 1), &material(dec.key_len(), 2))
+            .expect("init failed");
+        dec.update_sequence_number(seq).expect("seq failed");
+
+        let mut out = Vec::new();
+        dec.update(cipher, &mut out).expect("update failed");
+        dec.finalize(&mut out).expect("finalize failed");
+        out
+    }
+
+    fn plain() -> Vec<u8> {
+        b"attack at dawn".repeat(100)
+    }
+
+    /// A payload padded out to a whole number of 16-byte blocks.
+    ///
+    /// SSH performs padding in the packet layer, so these ciphers run with
+    /// OpenSSL padding disabled: CBC/3DES input must be block-aligned or
+    /// `finalize` fails.
+    fn plain_aligned() -> Vec<u8> {
+        let mut data = plain();
+        while data.len() % 16 != 0 {
+            data.push(0);
+        }
+        data
+    }
+
+    #[test]
+    fn ctr_ciphers_round_trip() {
+        for name in ["aes128-ctr", "aes192-ctr", "aes256-ctr"] {
+            let wire = seal(name, 0, &plain());
+            assert_eq!(wire.len(), plain().len(), "CTR is a stream cipher: {name}");
+            assert_ne!(&wire[..], &plain()[..], "ciphertext must differ: {name}");
+            assert_eq!(open(name, 0, &wire), plain(), "round trip failed: {name}");
+        }
+    }
+
+    #[test]
+    fn cbc_ciphers_round_trip() {
+        let payload = plain_aligned();
+        for name in ["aes128-cbc", "aes192-cbc", "aes256-cbc", "3des-cbc"] {
+            let wire = seal(name, 0, &payload);
+            assert_eq!(open(name, 0, &wire), payload, "round trip failed: {name}");
+        }
+    }
+
+    /// With SSH-style padding disabled in the cipher, a partial block is a
+    /// hard error instead of something OpenSSL quietly pads.
+    #[test]
+    fn cbc_rejects_unaligned_input() {
+        let mut enc = encryptor("aes256-cbc");
+        enc.initialize(&material(enc.iv_len(), 1), &material(enc.key_len(), 2))
+            .expect("init failed");
+        let mut out = Vec::new();
+        let unaligned = &plain()[..plain().len() - 1];
+        enc.update(unaligned, &mut out).expect("update failed");
+        assert!(enc.finalize(&mut out).is_err());
+    }
+
+    #[test]
+    fn ctr_keystream_advances_within_an_instance() {
+        // The IV comes from the key exchange and is fixed for the life of
+        // the cipher; the sequence number is *not* mixed in for CTR. Two
+        // packets under one instance must still differ, because the counter
+        // advances.
+        let mut enc = encryptor("aes256-ctr");
+        enc.initialize(&material(enc.iv_len(), 1), &material(enc.key_len(), 2))
+            .expect("init failed");
+
+        let mut first = Vec::new();
+        enc.update(&plain(), &mut first).expect("update failed");
+        enc.finalize(&mut first).expect("finalize failed");
+
+        let mut second = Vec::new();
+        enc.update(&plain(), &mut second).expect("update failed");
+        enc.finalize(&mut second).expect("finalize failed");
+
+        assert_eq!(first.len(), second.len());
+        assert_ne!(first, second, "keystream must not repeat within one cipher");
+    }
+
+    /// A freshly initialized cipher repeats the keystream of another with
+    /// the same key/IV — which is exactly why each direction of a connection
+    /// derives its own IV during key exchange.
+    #[test]
+    fn same_key_and_iv_produce_the_same_keystream() {
+        assert_eq!(
+            seal("aes256-ctr", 0, &plain()),
+            seal("aes256-ctr", 0, &plain())
+        );
+    }
+
+    #[test]
+    fn decrypting_with_the_wrong_key_yields_garbage() {
+        let wire = seal("aes256-ctr", 0, &plain());
+
+        let mut dec = decryptor("aes256-ctr");
+        dec.initialize(&material(dec.iv_len(), 1), &material(dec.key_len(), 99))
+            .expect("init failed");
+        let mut out = Vec::new();
+        dec.update(&wire, &mut out).expect("update failed");
+        dec.finalize(&mut out).expect("finalize failed");
+
+        assert_ne!(out, plain());
+    }
+
+    #[test]
+    fn non_aead_ciphers_report_no_tag() {
+        for name in ["aes256-ctr", "aes256-cbc", "3des-cbc"] {
+            let enc = encryptor(name);
+            assert!(!enc.is_galois_counter_mode(), "{name}");
+            assert_eq!(enc.tag_len(), 0, "{name}");
+            assert!(enc.block_size() >= 8, "{name}");
+            assert!(enc.key_len() > 0 && enc.iv_len() > 0, "{name}");
+        }
+    }
+
+    #[test]
+    fn aead_ciphers_report_a_tag() {
+        for name in [
+            "chacha20-poly1305@openssh.com",
+            "aes128-gcm@openssh.com",
+            "aes256-gcm@openssh.com",
+        ] {
+            let enc = encryptor(name);
+            assert!(enc.is_galois_counter_mode(), "{name}");
+            assert_eq!(enc.tag_len(), 16, "{name}");
+        }
+    }
+
+    /// Seals one packet the way `CipherStream::send_payload` does for an
+    /// AEAD cipher: the 4-byte length header is authenticated as AAD.
+    ///
+    /// chacha20-poly1305 encrypts that header in place, so the returned
+    /// header is the ciphertext that actually goes on the wire (and what the
+    /// receiver must feed back into `additional_authenticated_data`).
+    fn seal_aead(name: &str, seq: u32, plain: &[u8]) -> (Vec<u8>, Vec<u8>, [u8; 4]) {
+        let mut enc = encryptor(name);
+        enc.initialize(&material(enc.iv_len(), 1), &material(enc.key_len(), 2))
+            .expect("init failed");
+        enc.update_sequence_number(seq).expect("seq failed");
+
+        let mut header = (plain.len() as u32 + 16).to_be_bytes();
+        enc.additional_authenticated_data(&mut header)
+            .expect("aad failed");
+
+        let mut body = Vec::new();
+        enc.update(plain, &mut body).expect("update failed");
+        enc.finalize(&mut body).expect("finalize failed");
+
+        let mut tag = vec![0u8; enc.tag_len()];
+        enc.authentication_tag(&mut tag).expect("tag failed");
+        (body, tag, header)
+    }
+
+    /// Returns the plaintext, or the verification error when the packet was
+    /// tampered with (tag or authenticated header).
+    fn open_aead(
+        name: &str,
+        seq: u32,
+        body: &[u8],
+        tag: &[u8],
+        header: &[u8],
+    ) -> error::Result<Vec<u8>> {
+        let mut dec = decryptor(name);
+        dec.initialize(&material(dec.iv_len(), 1), &material(dec.key_len(), 2))?;
+        dec.update_sequence_number(seq)?;
+
+        let mut header = header.to_vec();
+        dec.additional_authenticated_data(&mut header)?;
+
+        let mut out = Vec::new();
+        dec.update(body, &mut out)?;
+        dec.authentication_tag(tag)?;
+        dec.finalize(&mut out)?;
+        Ok(out)
+    }
+
+    #[test]
+    fn chacha20_poly1305_round_trips_with_tag() {
+        let name = "chacha20-poly1305@openssh.com";
+        let (body, tag, header) = seal_aead(name, 7, &plain());
+        assert_eq!(tag.len(), 16);
+
+        assert_eq!(open_aead(name, 7, &body, &tag, &header).unwrap(), plain());
+    }
+
+    #[test]
+    fn aead_rejects_a_flipped_tag() {
+        let name = "chacha20-poly1305@openssh.com";
+        let (body, mut tag, header) = seal_aead(name, 0, &plain());
+        tag[0] ^= 0xff;
+
+        assert!(
+            open_aead(name, 0, &body, &tag, &header).is_err(),
+            "a tampered tag must not verify"
+        );
+    }
+
+    #[test]
+    fn aead_rejects_a_flipped_header() {
+        let name = "chacha20-poly1305@openssh.com";
+        let (body, tag, mut header) = seal_aead(name, 0, &plain());
+
+        // Same body/tag, but the authenticated length header disagrees.
+        header[3] ^= 0x01;
+        assert!(
+            open_aead(name, 0, &body, &tag, &header).is_err(),
+            "a tampered header must not verify"
+        );
+    }
+
+    #[test]
+    fn aead_rejects_a_flipped_body_byte() {
+        let name = "chacha20-poly1305@openssh.com";
+        let (mut body, tag, header) = seal_aead(name, 0, &plain());
+        body[10] ^= 0xff;
+
+        assert!(open_aead(name, 0, &body, &tag, &header).is_err());
+    }
+
+    #[test]
+    fn initialize_accepts_correctly_sized_material() {
+        let mut enc = encryptor("aes256-ctr");
+        // aes256-ctr needs a 32-byte key and a 16-byte IV.
+        assert!(enc.initialize(&[0u8; 16], &[0u8; 32]).is_ok());
+    }
+
+    /// KNOWN SHARP EDGE (not yet fixed): a key shorter than the cipher
+    /// requires trips an assertion inside OpenSSL's `CipherCtx`
+    /// (`key_len <= key.len()`) and panics rather than returning an error.
+    ///
+    /// The packet layer never hits this — key lengths come from the
+    /// negotiated algorithm — but a caller driving the `Encrypt` trait
+    /// directly can abort the thread.
+    #[test]
+    #[should_panic(expected = "key_len")]
+    fn initialize_with_a_short_key_panics() {
+        let mut enc = encryptor("aes256-ctr");
+        let _ = enc.initialize(&[0u8; 16], &[0u8; 16]);
+    }
+
+    #[test]
+    fn every_registered_cipher_has_sane_parameters() {
+        for name in encrypt_all() {
+            let enc = encryptor(name);
+            assert_eq!(enc.name(), cipher_name(name));
+            assert!(enc.block_size() > 0, "block_size of {name}");
+            assert!(enc.key_len() > 0, "key_len of {name}");
+            // AEAD ciphers take a nonce from the sequence number instead.
+            if enc.is_galois_counter_mode() {
+                assert_eq!(enc.tag_len(), 16, "tag_len of {name}");
+            }
+        }
+    }
+
+    /// See the note in `cipher::test`: `rijndael-cbc@lysator.liu.se` reports
+    /// the canonical name of the cipher it is an alias for.
+    fn cipher_name(registry_key: &str) -> &str {
+        match registry_key {
+            "rijndael-cbc@lysator.liu.se" => "aes256-cbc",
+            other => other,
+        }
+    }
+}
